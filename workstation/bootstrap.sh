@@ -34,7 +34,14 @@ fi
  
 # --- Run the playbook ---
 echo "==> [3/4] Running workstation playbook..."
-ansible-playbook "$INFRA_DIR/workstation/playbook.yml" --ask-become-pass
+
+# Skip become password prompt if already root
+if [ "$EUID" -eq 0 ]; then
+    ansible-playbook "$INFRA_DIR/workstation/playbook.yml"
+else
+    ansible-playbook "$INFRA_DIR/workstation/playbook.yml" --ask-become-pass
+fi
+
  
 # --- Done ---
 echo ""
