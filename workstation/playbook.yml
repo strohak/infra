@@ -1,0 +1,203 @@
+---
+# workstation/playbook.yml
+# Ansible playbook for restoring the 'bones' WSL2 dev environment.
+# Idempotent — safe to re-run at any time to update tools or verify state.
+#
+# Run directly:  ansible-playbook playbook.yml --ask-become-pass
+
+- name: Workstation Setup
+  hosts: localhost
+  connection: local
+
+  vars:
+    go_version: "1.24.5"           # Update this when upgrading Go
+    go_install_dir: /usr/local/go
+    user_home: "{{ ansible_env.HOME }}"
+    user_bin: "{{ ansible_env.HOME }}/bin"
+
+    apt_packages:
+      - git
+      - curl
+      - wget
+      - zsh
+      - build-essential
+      - podman
+      - podman-compose
+      - python3
+      - python3-pip
+      - python3-venv
+      - jq
+      - ripgrep
+      - fzf
+      - htop
+      - unzip
+      - ca-certificates
+      - gnupg
+      - make
+
+    go_tools:
+      - "golang.org/x/tools/gopls@latest"
+      - "github.com/golangci/golangci-lint/cmd/golangci-lint@latest"
+      - "github.com/air-verse/air@latest"
+      - "github.com/go-delve/delve/cmd/dlv@latest"
+      - "github.com/josharian/impl@latest"           # generate interface stubs
+      - "golang.org/x/tools/cmd/goimports@latest"    # import organizer
+
+    project_dirs:
+      - "{{ user_home }}/code/personal"
+      - "{{ user_home }}/code/lab"
+      - "{{ user_home }}/code/infra"
+      - "{{ user_home }}/bin"
+
+  tasks:
+
+    # ── System packages ────────────────────────────────────────────────────────
+
+    - name: Update apt cache
+      become: true
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install apt packages
+      become: true
+      apt:
+        name: "{{ apt_packages }}"
+        state: present
+
+    # ── Shell ──────────────────────────────────────────────────────────────────
+
+    - name: Set zsh as default shell
+      become: true
+      user:
+        name: "{{ ansible_user_id }}"
+        shell: /usr/bin/zsh
+
+    - name: Ensure .zshrc exists
+      file:
+        path: "{{ user_home }}/.zshrc"
+        state: touch
+        mode: "0644"
+        modification_time: preserve
+        access_time: preserve
+
+    # ── Directory structure ────────────────────────────────────────────────────
+
+    - name: Create project directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ project_dirs }}"
+
+    # ── Go ─────────────────────────────────────────────────────────────────────
+
+    - name: Check current Go version
+      command: "{{ go_install_dir }}/bin/go version"
+      register: go_installed
+      ignore_errors: true
+      changed_when: false
+
+    - name: Set go_needs_install fact
+      set_fact:
+        go_needs_install: >-
+          {{ go_installed.failed or ('go' + go_version) not in go_installed.stdout }}
+
+    - name: Download Go tarball
+      become: true
+      get_url:
+        url: "https://go.dev/dl/go{{ go_version }}.linux-amd64.tar.gz"
+        dest: "/tmp/go{{ go_version }}.tar.gz"
+        mode: "0644"
+      when: go_needs_install
+
+    - name: Remove existing Go installation
+      become: true
+      file:
+        path: "{{ go_install_dir }}"
+        state: absent
+      when: go_needs_install
+
+    - name: Install Go
+      become: true
+      unarchive:
+        src: "/tmp/go{{ go_version }}.tar.gz"
+        dest: /usr/local
+        remote_src: true
+      when: go_needs_install
+
+    - name: Add Go and GOPATH to .zshrc
+      blockinfile:
+        path: "{{ user_home }}/.zshrc"
+        marker: "# {mark} ANSIBLE MANAGED — Go"
+        block: |
+          export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
+          export GOPATH=$HOME/go
+
+    # ── Go tools ───────────────────────────────────────────────────────────────
+
+    - name: Install Go tools
+      command: "/usr/local/go/bin/go install {{ item }}"
+      environment:
+        HOME: "{{ user_home }}"
+        GOPATH: "{{ user_home }}/go"
+        PATH: "/usr/local/go/bin:{{ ansible_env.PATH }}"
+      loop: "{{ go_tools }}"
+      # go install is idempotent (reinstalls if binary missing); we flag changed
+      # to keep re-runs visible in output
+      changed_when: true
+
+    # ── Podman ─────────────────────────────────────────────────────────────────
+
+    - name: Add Podman and docker alias to .zshrc
+      blockinfile:
+        path: "{{ user_home }}/.zshrc"
+        marker: "# {mark} ANSIBLE MANAGED — Podman"
+        block: |
+          alias docker=podman
+          alias docker-compose=podman-compose
+
+    # ── Starship prompt ────────────────────────────────────────────────────────
+
+    - name: Check if Starship is installed
+      command: which starship
+      register: starship_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Install Starship
+      shell: curl -sS https://starship.rs/install.sh | sh -s -- --yes
+      when: starship_check.failed
+
+    - name: Add Starship init to .zshrc
+      blockinfile:
+        path: "{{ user_home }}/.zshrc"
+        marker: "# {mark} ANSIBLE MANAGED — Starship"
+        block: |
+          eval "$(starship init zsh)"
+
+    # ── Personal bin ───────────────────────────────────────────────────────────
+
+    - name: Add ~/bin to PATH in .zshrc
+      blockinfile:
+        path: "{{ user_home }}/.zshrc"
+        marker: "# {mark} ANSIBLE MANAGED — bin"
+        block: |
+          export PATH=$HOME/bin:$PATH
+
+    # ── Summary ────────────────────────────────────────────────────────────────
+
+    - name: Print completion summary
+      debug:
+        msg:
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - " Workstation setup complete"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - " Go:      {{ go_version }} → /usr/local/go"
+          - " Shell:   zsh + Starship"
+          - " Containers: podman + podman-compose"
+          - " Go tools: gopls, golangci-lint, air, dlv, impl, goimports"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - " Restore SSH keys and dotfiles manually."
+          - " Then run: exec zsh"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
