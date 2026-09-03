@@ -30,7 +30,9 @@ Set your username and password when prompted.
 bash <(curl -fsSL https://raw.githubusercontent.com/strohak/infra/master/workstation/bootstrap.sh)
 ```
  
-This installs everything — Go, Podman, zsh, Starship, all Go tools, and your directory structure. Takes a few minutes.
+This installs everything — Go, Podman, zsh, Starship (with a managed `starship.toml`), the GitHub CLI (`gh`), Zellij, all Go tools, and your directory structure. Takes a few minutes.
+
+On a bare-metal Ubuntu-family desktop (detected via the kernel string, as opposed to a WSL2 shell), it also installs VS Code and a curated set of extensions.
  
 ---
  
@@ -110,3 +112,23 @@ ansible-playbook playbook.yml --ask-become-pass
 ## Updating Go
  
 Change the `go_version` variable at the top of `playbook.yml` and re-run the playbook.
+
+## Updating Zellij
+
+Change the `zellij_version` variable at the top of `playbook.yml` and re-run the playbook.
+
+## Known machine-specific items (not automated)
+
+These are real, in-use pieces of infrastructure on some machines but are intentionally
+out of scope for this playbook — they're either personal preference, tied to a specific
+box's storage/network layout, or both. Documented here so they aren't rediscovered from
+scratch:
+
+- **NordVPN** — personal VPN client, installed manually per machine.
+- **Samba** — LAN file sharing, configured manually with host-specific settings.
+- **OpenVPN** — separate from NordVPN, purpose is machine-specific.
+- **ZFS + Snapper + Timeshift + restic** — filesystem snapshotting and backup stack,
+  tied to a specific disk/pool layout and `systemd` timers set up by hand.
+
+If any of these need to become reproducible later, they belong in their own
+machine-specific playbook or role rather than this general dev-workstation one.

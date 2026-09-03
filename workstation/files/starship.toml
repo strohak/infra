@@ -1,0 +1,26 @@
+# ANSIBLE MANAGED — installed by workstation/playbook.yml
+# Deliberately ASCII-only (no Nerd Font glyphs) so the prompt renders correctly
+# in any terminal font.
+
+format = """
+$directory$git_branch$git_status$cmd_duration
+$character"""
+
+[directory]
+truncation_length = 3
+truncate_to_repo = true
+
+[git_branch]
+symbol = "git:"
+format = "[$symbol$branch]($style) "
+
+[git_status]
+format = "([$all_status$ahead_behind]($style)) "
+
+[cmd_duration]
+format = "took [$duration]($style) "
+min_time = 2000
+
+[character]
+success_symbol = "[>](bold green)"
+error_symbol = "[>](bold red)"

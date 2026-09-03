@@ -34,6 +34,25 @@
       - ca-certificates
       - gnupg
       - make
+      - gh
+
+    zellij_version: "0.44.3"   # Update this when upgrading Zellij
+
+    vscode_extensions:
+      - golang.go
+      - ms-python.python
+      - ms-python.vscode-pylance
+      - ms-python.debugpy
+      - ms-python.vscode-python-envs
+      - redhat.vscode-yaml
+      - ms-vscode.makefile-tools
+      - nefrob.vscode-just-syntax
+      - ms-azuretools.vscode-containers
+      - ms-vscode-remote.remote-ssh
+      - ms-vscode-remote.remote-ssh-edit
+      - ms-vscode-remote.remote-containers
+      - ms-vscode.remote-explorer
+      - anthropic.claude-code
 
     go_tools:
       - "golang.org/x/tools/gopls@latest"
@@ -50,6 +69,46 @@
       - "{{ user_home }}/bin"
 
   tasks:
+
+    # ── Profile detection ──────────────────────────────────────────────────────
+    # WSL2 kernels are tagged e.g. "5.15.153.1-microsoft-standard-WSL2"; this is
+    # more robust than matching on distribution name since it works for any
+    # Ubuntu-family target (WSL2 Ubuntu vs. bare-metal Ubuntu/Mint desktops).
+
+    - name: Detect WSL2
+      set_fact:
+        wsl_detected: "{{ 'microsoft' in ansible_facts['kernel'] | lower }}"
+        dpkg_arch: "{{ lookup('pipe', 'dpkg --print-architecture') }}"
+
+    # ── GitHub CLI apt repo ────────────────────────────────────────────────────
+
+    - name: Add GitHub CLI apt keyring directory
+      become: true
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add GitHub CLI apt keyring
+      become: true
+      get_url:
+        url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+        dest: /etc/apt/keyrings/githubcli-archive-keyring.gpg
+        mode: "0644"
+
+    - name: Add GitHub CLI apt repository
+      become: true
+      copy:
+        dest: /etc/apt/sources.list.d/github-cli.list
+        mode: "0644"
+        content: "deb [arch={{ dpkg_arch }} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n"
+      register: gh_repo_added
+
+    - name: Update apt cache after adding GitHub CLI repo
+      become: true
+      apt:
+        update_cache: true
+      when: gh_repo_added.changed
 
     # ── System packages ────────────────────────────────────────────────────────
 
@@ -157,6 +216,35 @@
           alias docker=podman
           alias docker-compose=podman-compose
 
+    # ── Zellij ─────────────────────────────────────────────────────────────────
+
+    - name: Check current Zellij version
+      command: zellij --version
+      register: zellij_installed
+      ignore_errors: true
+      changed_when: false
+
+    - name: Set zellij_needs_install fact
+      set_fact:
+        zellij_needs_install: >-
+          {{ zellij_installed.failed or zellij_version not in zellij_installed.stdout }}
+
+    - name: Download Zellij tarball
+      get_url:
+        url: "https://github.com/zellij-org/zellij/releases/download/v{{ zellij_version }}/zellij-x86_64-unknown-linux-musl.tar.gz"
+        dest: "/tmp/zellij-{{ zellij_version }}.tar.gz"
+        mode: "0644"
+      when: zellij_needs_install
+
+    - name: Install Zellij binary
+      become: true
+      unarchive:
+        src: "/tmp/zellij-{{ zellij_version }}.tar.gz"
+        dest: /usr/local/bin
+        remote_src: true
+        mode: "0755"
+      when: zellij_needs_install
+
     # ── Starship prompt ────────────────────────────────────────────────────────
 
     - name: Check if Starship is installed
@@ -176,6 +264,77 @@
         block: |
           eval "$(starship init zsh)"
 
+    - name: Ensure ~/.config directory exists
+      file:
+        path: "{{ user_home }}/.config"
+        state: directory
+        mode: "0755"
+
+    - name: Install Starship config
+      copy:
+        src: files/starship.toml
+        dest: "{{ user_home }}/.config/starship.toml"
+        mode: "0644"
+
+    # ── VS Code (bare-metal desktops only — skipped under WSL2) ─────────────────
+    # The `code` package manages its own apt repo file (vscode.sources) via its
+    # postinst script once installed, so we only add ours if nothing has claimed
+    # this repo yet — otherwise apt sees two conflicting Signed-By declarations
+    # for the same URL.
+
+    - name: Check for an existing VS Code apt repo
+      stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/apt/sources.list.d/vscode.sources
+        - /etc/apt/sources.list.d/vscode.list
+      register: vscode_repo_files
+      when: not wsl_detected
+
+    - name: Set vscode_repo_exists fact
+      set_fact:
+        vscode_repo_exists: "{{ (not wsl_detected) and (vscode_repo_files.results | selectattr('stat.exists', 'true') | list | length > 0) }}"
+
+    - name: Add Microsoft apt keyring
+      become: true
+      get_url:
+        url: https://packages.microsoft.com/keys/microsoft.asc
+        dest: /etc/apt/keyrings/microsoft.asc
+        mode: "0644"
+      when: not wsl_detected and not vscode_repo_exists
+
+    - name: Add VS Code apt repository
+      become: true
+      copy:
+        dest: /etc/apt/sources.list.d/vscode.list
+        mode: "0644"
+        content: "deb [arch={{ dpkg_arch }} signed-by=/etc/apt/keyrings/microsoft.asc] https://packages.microsoft.com/repos/code stable main\n"
+      register: vscode_repo_added
+      when: not wsl_detected and not vscode_repo_exists
+
+    - name: Update apt cache after adding VS Code repo
+      become: true
+      apt:
+        update_cache: true
+      when: not wsl_detected and not vscode_repo_exists and vscode_repo_added.changed
+
+    - name: Install VS Code
+      become: true
+      apt:
+        name: code
+        state: present
+      when: not wsl_detected
+
+    - name: Install VS Code extensions
+      command: "code --install-extension {{ item }} --force"
+      loop: "{{ vscode_extensions }}"
+      changed_when: true
+      when: not wsl_detected
+      register: vscode_ext_install
+      retries: 3
+      delay: 3
+      until: vscode_ext_install is not failed
+
     # ── Personal bin ───────────────────────────────────────────────────────────
 
     - name: Add ~/bin to PATH in .zshrc
@@ -193,10 +352,13 @@
           - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           - " Workstation setup complete"
           - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          - " Go:      {{ go_version }} → /usr/local/go"
-          - " Shell:   zsh + Starship"
+          - " Profile:    {{ 'WSL2' if wsl_detected else 'bare-metal desktop' }}"
+          - " Go:         {{ go_version }} → /usr/local/go"
+          - " Shell:      zsh + Starship ({{ user_home }}/.config/starship.toml)"
           - " Containers: podman + podman-compose"
-          - " Go tools: gopls, golangci-lint, air, dlv, impl, goimports"
+          - " Go tools:   gopls, golangci-lint, air, dlv, impl, goimports"
+          - " CLI:        gh, zellij {{ zellij_version }}"
+          - "{{ ' VS Code:    installed + curated extensions' if not wsl_detected else ' VS Code:    skipped (WSL2 — use the Windows-side install)' }}"
           - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           - " Restore SSH keys and dotfiles manually."
           - " Then run: exec zsh"
