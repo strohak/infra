@@ -10,7 +10,14 @@ set -euo pipefail
  
 INFRA_REPO="https://github.com/strohak/infra"
 INFRA_DIR="$HOME/code/infra"
- 
+
+# No sudo needed (or available) when already running as root
+if [ "$EUID" -eq 0 ]; then
+    SUDO=""
+else
+    SUDO="sudo"
+fi
+
 echo ""
 echo "╔══════════════════════════════════════╗"
 echo "║   Workstation Bootstrap — bones      ║"
@@ -19,8 +26,8 @@ echo ""
  
 # --- Prereqs ---
 echo "==> [1/4] Updating apt and installing Ansible..."
-sudo apt update -qq
-sudo apt install -y ansible git curl
+$SUDO apt update -qq
+$SUDO apt install -y ansible git curl
  
 # --- Clone infra repo (skip if already present) ---
 echo "==> [2/4] Getting infra repo..."

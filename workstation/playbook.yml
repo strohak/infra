@@ -79,25 +79,26 @@
       set_fact:
         wsl_detected: "{{ 'microsoft' in ansible_facts['kernel'] | lower }}"
         dpkg_arch: "{{ lookup('pipe', 'dpkg --print-architecture') }}"
+        become_needed: "{{ ansible_facts['effective_user_id'] != 0 }}"
 
     # ── GitHub CLI apt repo ────────────────────────────────────────────────────
 
     - name: Add GitHub CLI apt keyring directory
-      become: true
+      become: "{{ become_needed }}"
       file:
         path: /etc/apt/keyrings
         state: directory
         mode: "0755"
 
     - name: Add GitHub CLI apt keyring
-      become: true
+      become: "{{ become_needed }}"
       get_url:
         url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
         dest: /etc/apt/keyrings/githubcli-archive-keyring.gpg
         mode: "0644"
 
     - name: Add GitHub CLI apt repository
-      become: true
+      become: "{{ become_needed }}"
       copy:
         dest: /etc/apt/sources.list.d/github-cli.list
         mode: "0644"
@@ -105,7 +106,7 @@
       register: gh_repo_added
 
     - name: Update apt cache after adding GitHub CLI repo
-      become: true
+      become: "{{ become_needed }}"
       apt:
         update_cache: true
       when: gh_repo_added.changed
@@ -113,13 +114,13 @@
     # ── System packages ────────────────────────────────────────────────────────
 
     - name: Update apt cache
-      become: true
+      become: "{{ become_needed }}"
       apt:
         update_cache: true
         cache_valid_time: 3600
 
     - name: Install apt packages
-      become: true
+      become: "{{ become_needed }}"
       apt:
         name: "{{ apt_packages }}"
         state: present
@@ -127,7 +128,7 @@
     # ── Shell ──────────────────────────────────────────────────────────────────
 
     - name: Set zsh as default shell
-      become: true
+      become: "{{ become_needed }}"
       user:
         name: "{{ ansible_user_id }}"
         shell: /usr/bin/zsh
@@ -163,7 +164,7 @@
           {{ go_installed.failed or ('go' + go_version) not in go_installed.stdout }}
 
     - name: Download Go tarball
-      become: true
+      become: "{{ become_needed }}"
       get_url:
         url: "https://go.dev/dl/go{{ go_version }}.linux-amd64.tar.gz"
         dest: "/tmp/go{{ go_version }}.tar.gz"
@@ -171,14 +172,14 @@
       when: go_needs_install
 
     - name: Remove existing Go installation
-      become: true
+      become: "{{ become_needed }}"
       file:
         path: "{{ go_install_dir }}"
         state: absent
       when: go_needs_install
 
     - name: Install Go
-      become: true
+      become: "{{ become_needed }}"
       unarchive:
         src: "/tmp/go{{ go_version }}.tar.gz"
         dest: /usr/local
@@ -237,7 +238,7 @@
       when: zellij_needs_install
 
     - name: Install Zellij binary
-      become: true
+      become: "{{ become_needed }}"
       unarchive:
         src: "/tmp/zellij-{{ zellij_version }}.tar.gz"
         dest: /usr/local/bin
@@ -296,7 +297,7 @@
         vscode_repo_exists: "{{ (not wsl_detected) and (vscode_repo_files.results | selectattr('stat.exists', 'true') | list | length > 0) }}"
 
     - name: Add Microsoft apt keyring
-      become: true
+      become: "{{ become_needed }}"
       get_url:
         url: https://packages.microsoft.com/keys/microsoft.asc
         dest: /etc/apt/keyrings/microsoft.asc
@@ -304,7 +305,7 @@
       when: not wsl_detected and not vscode_repo_exists
 
     - name: Add VS Code apt repository
-      become: true
+      become: "{{ become_needed }}"
       copy:
         dest: /etc/apt/sources.list.d/vscode.list
         mode: "0644"
@@ -313,20 +314,23 @@
       when: not wsl_detected and not vscode_repo_exists
 
     - name: Update apt cache after adding VS Code repo
-      become: true
+      become: "{{ become_needed }}"
       apt:
         update_cache: true
       when: not wsl_detected and not vscode_repo_exists and vscode_repo_added.changed
 
     - name: Install VS Code
-      become: true
+      become: "{{ become_needed }}"
       apt:
         name: code
         state: present
       when: not wsl_detected
 
     - name: Install VS Code extensions
-      command: "code --install-extension {{ item }} --force"
+      # code refuses to run as root/sudo without these extra flags
+      command: >-
+        code --install-extension {{ item }} --force
+        {{ '--no-sandbox --user-data-dir=' + user_home + '/.vscode-root' if not become_needed else '' }}
       loop: "{{ vscode_extensions }}"
       changed_when: true
       when: not wsl_detected
