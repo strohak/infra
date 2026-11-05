@@ -10,7 +10,7 @@
   connection: local
 
   vars:
-    go_version: "1.24.5"           # Update this when upgrading Go
+    go_version: "1.27.3"           # Update this when upgrading Go
     go_install_dir: /usr/local/go
     user_home: "{{ ansible_env.HOME }}"
     user_bin: "{{ ansible_env.HOME }}/bin"
@@ -54,13 +54,34 @@
       - ms-vscode.remote-explorer
       - anthropic.claude-code
 
+    # Pinned so re-runs are reproducible and only reinstall when a version
+    # changes. `module` is the module path that `go version -m` reports for
+    # the binary; bump `version` and re-run to upgrade a tool.
     go_tools:
-      - "golang.org/x/tools/gopls@latest"
-      - "github.com/golangci/golangci-lint/cmd/golangci-lint@latest"
-      - "github.com/air-verse/air@latest"
-      - "github.com/go-delve/delve/cmd/dlv@latest"
-      - "github.com/josharian/impl@latest"           # generate interface stubs
-      - "golang.org/x/tools/cmd/goimports@latest"    # import organizer
+      - bin: gopls
+        pkg: golang.org/x/tools/gopls
+        module: golang.org/x/tools/gopls
+        version: v0.24.0
+      - bin: golangci-lint
+        pkg: github.com/golangci/golangci-lint/v2/cmd/golangci-lint
+        module: github.com/golangci/golangci-lint/v2
+        version: v2.15.0
+      - bin: air
+        pkg: github.com/air-verse/air
+        module: github.com/air-verse/air
+        version: v1.67.4
+      - bin: dlv
+        pkg: github.com/go-delve/delve/cmd/dlv
+        module: github.com/go-delve/delve
+        version: v1.27.2
+      - bin: impl                                  # generate interface stubs
+        pkg: github.com/josharian/impl
+        module: github.com/josharian/impl
+        version: v1.5.0
+      - bin: goimports                             # import organizer
+        pkg: golang.org/x/tools/cmd/goimports
+        module: golang.org/x/tools
+        version: v0.52.0
 
     project_dirs:
       - "{{ user_home }}/code/personal"
@@ -80,6 +101,16 @@
         wsl_detected: "{{ 'microsoft' in ansible_facts['kernel'] | lower }}"
         dpkg_arch: "{{ lookup('pipe', 'dpkg --print-architecture') }}"
         become_needed: "{{ ansible_facts['effective_user_id'] != 0 }}"
+
+    # Go tarballs use Debian arch names (amd64/arm64); Zellij uses GNU triples.
+    - name: Fail on unsupported architecture
+      fail:
+        msg: "Unsupported architecture '{{ dpkg_arch }}' — only amd64 and arm64 are handled"
+      when: dpkg_arch not in ['amd64', 'arm64']
+
+    - name: Set release asset arch names
+      set_fact:
+        zellij_arch: "{{ {'amd64': 'x86_64', 'arm64': 'aarch64'}[dpkg_arch] }}"
 
     # ── GitHub CLI apt repo ────────────────────────────────────────────────────
 
@@ -166,7 +197,7 @@
     - name: Download Go tarball
       become: "{{ become_needed }}"
       get_url:
-        url: "https://go.dev/dl/go{{ go_version }}.linux-amd64.tar.gz"
+        url: "https://go.dev/dl/go{{ go_version }}.linux-{{ dpkg_arch }}.tar.gz"
         dest: "/tmp/go{{ go_version }}.tar.gz"
         mode: "0644"
       when: go_needs_install
@@ -196,16 +227,32 @@
 
     # ── Go tools ───────────────────────────────────────────────────────────────
 
+    - name: Check installed Go tool versions
+      command: "{{ go_install_dir }}/bin/go version -m {{ user_home }}/go/bin/{{ item.bin }}"
+      loop: "{{ go_tools }}"
+      loop_control:
+        label: "{{ item.bin }}"
+      register: go_tool_check
+      failed_when: false
+      changed_when: false
+
+    # `go version -m` prints a line like "\tmod\t<module>\t<version>\t<hash>".
+    # Install only when the binary is missing or that line doesn't match the pin.
     - name: Install Go tools
-      command: "/usr/local/go/bin/go install {{ item }}"
+      command: "{{ go_install_dir }}/bin/go install {{ item.item.pkg }}@{{ item.item.version }}"
       environment:
         HOME: "{{ user_home }}"
         GOPATH: "{{ user_home }}/go"
-        PATH: "/usr/local/go/bin:{{ ansible_env.PATH }}"
-      loop: "{{ go_tools }}"
-      # go install is idempotent (reinstalls if binary missing); we flag changed
-      # to keep re-runs visible in output
-      changed_when: true
+        PATH: "{{ go_install_dir }}/bin:{{ ansible_env.PATH }}"
+        # Fail loudly if a tool needs a newer Go than go_version, instead of
+        # silently downloading a different toolchain to build it.
+        GOTOOLCHAIN: local
+      loop: "{{ go_tool_check.results }}"
+      loop_control:
+        label: "{{ item.item.bin }}@{{ item.item.version }}"
+      when: >-
+        item.rc != 0 or
+        item.stdout is not search('(?m)^\\s+mod\\s+' + (item.item.module | regex_escape) + '\\s+' + (item.item.version | regex_escape) + '\\s')
 
     # ── Podman ─────────────────────────────────────────────────────────────────
 
@@ -232,7 +279,7 @@
 
     - name: Download Zellij tarball
       get_url:
-        url: "https://github.com/zellij-org/zellij/releases/download/v{{ zellij_version }}/zellij-x86_64-unknown-linux-musl.tar.gz"
+        url: "https://github.com/zellij-org/zellij/releases/download/v{{ zellij_version }}/zellij-{{ zellij_arch }}-unknown-linux-musl.tar.gz"
         dest: "/tmp/zellij-{{ zellij_version }}.tar.gz"
         mode: "0644"
       when: zellij_needs_install
@@ -254,8 +301,11 @@
       ignore_errors: true
       changed_when: false
 
+    # Run the installer with become so it can write to /usr/local/bin itself;
+    # otherwise it tries to call sudo interactively, which hangs under Ansible.
     - name: Install Starship
-      shell: curl -sS https://starship.rs/install.sh | sh -s -- --yes
+      become: "{{ become_needed }}"
+      shell: curl -sS https://starship.rs/install.sh | sh -s -- --yes --bin-dir /usr/local/bin
       when: starship_check.failed
 
     - name: Add Starship init to .zshrc

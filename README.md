@@ -92,10 +92,12 @@ exec zsh
  
 ```
 infra/
+├── README.md              # this file
 └── workstation/
-    ├── README.md        # this file
-    ├── bootstrap.sh     # run on a fresh WSL2 install to kick off setup
-    └── playbook.yml     # Ansible playbook — idempotent, safe to re-run
+    ├── bootstrap.sh       # run on a fresh WSL2 install to kick off setup
+    ├── playbook.yml       # Ansible playbook — idempotent, safe to re-run
+    └── files/
+        └── starship.toml  # Starship prompt config, copied to ~/.config/
 ```
  
 ---
@@ -112,6 +114,19 @@ ansible-playbook playbook.yml --ask-become-pass
 ## Updating Go
  
 Change the `go_version` variable at the top of `playbook.yml` and re-run the playbook.
+
+## Updating Go tools
+
+Each entry in `go_tools` in `playbook.yml` pins a version. Bump `version` and
+re-run the playbook. A tool is only reinstalled when its installed binary
+doesn't match the pin, so re-runs are quiet otherwise.
+
+Tools are built with `GOTOOLCHAIN=local`, so if a new tool release needs a
+newer Go than `go_version`, the install fails instead of silently downloading
+another toolchain. Bump `go_version` first in that case.
+
+`golangci-lint` is on v2. Older v1 `.golangci.yml` files can be converted with
+`golangci-lint migrate`.
 
 ## Updating Zellij
 
