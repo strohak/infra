@@ -30,7 +30,7 @@ Set your username and password when prompted.
 bash <(curl -fsSL https://raw.githubusercontent.com/strohak/infra/master/workstation/bootstrap.sh)
 ```
  
-This installs everything — Go, Podman, zsh, Starship (with a managed `starship.toml`), the GitHub CLI (`gh`), Zellij, all Go tools, and your directory structure. Takes a few minutes.
+This installs everything — Go, Docker Engine (plus Podman), zsh, Starship (with a managed `starship.toml`), the GitHub CLI (`gh`), Zellij, all Go tools, and your directory structure. Takes a few minutes.
 
 On a bare-metal Ubuntu-family desktop (detected via the kernel string, as opposed to a WSL2 shell), it also installs VS Code and a curated set of extensions.
  

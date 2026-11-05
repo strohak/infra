@@ -36,6 +36,16 @@
       - make
       - gh
 
+    # Docker Engine from Docker's own apt repo (not Ubuntu's docker.io, and not
+    # Docker Desktop). Installed alongside Podman — the two don't conflict as
+    # long as nothing aliases one to the other.
+    docker_packages:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+
     zellij_version: "0.44.3"   # Update this when upgrading Zellij
 
     vscode_extensions:
@@ -110,6 +120,36 @@
       apt:
         update_cache: true
       when: gh_repo_added.changed
+
+    # ── Docker apt repo ────────────────────────────────────────────────────────
+    # Linux Mint and other derivatives report their own VERSION_CODENAME, but
+    # Docker publishes repos keyed by the Ubuntu base, so prefer UBUNTU_CODENAME.
+
+    - name: Look up Ubuntu base codename
+      shell: . /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+      register: ubuntu_codename
+      changed_when: false
+
+    - name: Add Docker apt keyring
+      become: "{{ become_needed }}"
+      get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker apt repository
+      become: "{{ become_needed }}"
+      copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        mode: "0644"
+        content: "deb [arch={{ dpkg_arch }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ubuntu_codename.stdout }} stable\n"
+      register: docker_repo_added
+
+    - name: Update apt cache after adding Docker repo
+      become: "{{ become_needed }}"
+      apt:
+        update_cache: true
+      when: docker_repo_added.changed
 
     # ── System packages ────────────────────────────────────────────────────────
 
@@ -208,14 +248,56 @@
       changed_when: true
 
     # ── Podman ─────────────────────────────────────────────────────────────────
+    # Podman stays installed (via apt_packages) and is used as `podman`.
+    # Earlier versions of this playbook aliased docker→podman; remove that
+    # block so `docker` reaches the real Docker Engine installed below.
 
-    - name: Add Podman and docker alias to .zshrc
+    - name: Remove legacy docker→podman aliases from .zshrc
       blockinfile:
         path: "{{ user_home }}/.zshrc"
         marker: "# {mark} ANSIBLE MANAGED — Podman"
-        block: |
-          alias docker=podman
-          alias docker-compose=podman-compose
+        state: absent
+
+    # ── Docker Engine ──────────────────────────────────────────────────────────
+    # dockerd runs as a systemd service. Recent Ubuntu WSL2 images enable
+    # systemd by default; older ones need it switched on by hand, which also
+    # needs a `wsl --shutdown` from Windows, so we stop with instructions
+    # rather than edit /etc/wsl.conf ourselves.
+
+    - name: Check that systemd is running
+      stat:
+        path: /run/systemd/system
+      register: systemd_dir
+
+    - name: Fail if systemd is not running
+      fail:
+        msg: >-
+          Docker needs systemd, and it isn't running.
+          {% if wsl_detected %}Add "[boot]" and "systemd=true" to /etc/wsl.conf,
+          run `wsl --shutdown` in PowerShell, reopen WSL, and re-run this playbook.{% endif %}
+      when: not systemd_dir.stat.exists
+
+    - name: Install Docker Engine
+      become: "{{ become_needed }}"
+      apt:
+        name: "{{ docker_packages }}"
+        state: present
+
+    - name: Enable and start Docker
+      become: "{{ become_needed }}"
+      systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    # Group membership takes effect on next login (or `newgrp docker`).
+    - name: Add user to docker group
+      become: "{{ become_needed }}"
+      user:
+        name: "{{ ansible_user_id }}"
+        groups: docker
+        append: true
+      when: ansible_user_id != 'root'
 
     # ── Zellij ─────────────────────────────────────────────────────────────────
 
@@ -359,11 +441,12 @@
           - " Profile:    {{ 'WSL2' if wsl_detected else 'bare-metal desktop' }}"
           - " Go:         {{ go_version }} → /usr/local/go"
           - " Shell:      zsh + Starship ({{ user_home }}/.config/starship.toml)"
-          - " Containers: podman + podman-compose"
+          - " Containers: docker engine + compose plugin (podman also installed)"
           - " Go tools:   gopls, golangci-lint, air, dlv, impl, goimports"
           - " CLI:        gh, zellij {{ zellij_version }}"
           - "{{ ' VS Code:    installed + curated extensions' if not wsl_detected else ' VS Code:    skipped (WSL2 — use the Windows-side install)' }}"
           - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - " Log out/in (or `newgrp docker`) to use docker without sudo."
           - " Restore SSH keys and dotfiles manually."
           - " Then run: exec zsh"
           - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
