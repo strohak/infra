@@ -92,10 +92,11 @@ exec zsh
  
 ```
 infra/
-└── workstation/
-    ├── README.md        # this file
-    ├── bootstrap.sh     # run on a fresh WSL2 install to kick off setup
-    └── playbook.yml     # Ansible playbook — idempotent, safe to re-run
+├── workstation/
+│   ├── README.md        # this file
+│   ├── bootstrap.sh     # run on a fresh WSL2 install to kick off setup
+│   └── playbook.yml     # Ansible playbook — idempotent, safe to re-run
+└── llm-stack/           # Ollama + self-hosted Langfuse (opt-in, see its README)
 ```
  
 ---

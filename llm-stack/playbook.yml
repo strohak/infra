@@ -1,0 +1,144 @@
+---
+# llm-stack/playbook.yml
+# Local LLM stack for this workstation: Ollama (native, on the host) and a
+# self-hosted Langfuse (Docker Compose) for tracing.
+#
+# Kept separate from workstation/playbook.yml on purpose: Langfuse is six
+# containers and several GB of RAM, so it should only run when you ask.
+# Requires Docker Engine (installed by the workstation playbook).
+#
+# Run:  ansible-playbook playbook.yml --ask-become-pass
+#       (from a root shell: ansible-playbook playbook.yml)
+#
+# Override vars without editing:  -e '{"ollama_models": ["qwen2.5:7b"]}'
+# Install/pull only, don't start Langfuse:  -e llm_stack_start=false
+
+- name: LLM Stack Setup
+  hosts: localhost
+  connection: local
+
+  vars:
+    # Always include an explicit tag — `ollama list` reports untagged names
+    # as `name:latest`, which would make the "already pulled?" check miss.
+    # Rough sizing (Q4 quantized):  3B ≈ 2 GB · 7–8B ≈ 5 GB · 14B ≈ 9 GB.
+    # Without a GPU, stay at 3B–8B.
+    ollama_models:
+      - "llama3.2:3b"        # small, fast on CPU, supports tool calling
+
+    llm_stack_start: true
+    langfuse_image_tag: "4"            # major-version tag; pin e.g. "4.80.1" for reproducibility
+    langfuse_project_id: chat-harness
+    langfuse_admin_email: admin@example.com   # login for http://localhost:3000
+
+  tasks:
+
+    - name: Set become_needed fact
+      set_fact:
+        become_needed: "{{ ansible_facts['effective_user_id'] != 0 }}"
+
+    # ── Prerequisites ──────────────────────────────────────────────────────────
+
+    - name: Check that Docker Compose is available
+      command: docker compose version
+      register: compose_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Fail if Docker Compose is missing
+      fail:
+        msg: "Docker Engine with the compose plugin is required — run workstation/playbook.yml first."
+      when: compose_check.failed
+
+    # ── Ollama ─────────────────────────────────────────────────────────────────
+    # The official installer drops the binary in /usr/local/bin, creates an
+    # `ollama` system user and systemd service, and detects NVIDIA GPUs
+    # (including WSL2's passthrough driver). Upgrade later by re-running the
+    # installer by hand:  curl -fsSL https://ollama.com/install.sh | sh
+
+    - name: Check if Ollama is installed
+      command: which ollama
+      register: ollama_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Install Ollama
+      become: "{{ become_needed }}"
+      shell: curl -fsSL https://ollama.com/install.sh | sh
+      when: ollama_check.failed
+
+    - name: Enable and start Ollama
+      become: "{{ become_needed }}"
+      systemd:
+        name: ollama
+        enabled: true
+        state: started
+
+    - name: Wait for the Ollama API
+      uri:
+        url: http://127.0.0.1:11434/api/version
+      register: ollama_api
+      retries: 15
+      delay: 2
+      until: ollama_api.status == 200
+
+    - name: List pulled Ollama models
+      command: ollama list
+      register: ollama_list
+      changed_when: false
+
+    - name: Pull Ollama models
+      command: "ollama pull {{ item }}"
+      loop: "{{ ollama_models }}"
+      when: item not in ollama_list.stdout
+
+    # ── Langfuse ───────────────────────────────────────────────────────────────
+
+    # force: false → only written when .env doesn't exist yet. Regenerating
+    # secrets for an existing database would lock Langfuse out of its own data.
+    - name: Generate .env with fresh secrets (first run only)
+      template:
+        src: templates/env.j2
+        dest: "{{ playbook_dir }}/.env"
+        mode: "0600"
+        force: false
+
+    - name: Start Langfuse
+      become: "{{ become_needed }}"   # docker group membership may not be active yet in this login
+      command: docker compose up -d --wait
+      args:
+        chdir: "{{ playbook_dir }}"
+      register: compose_up
+      changed_when: "'Started' in compose_up.stderr or 'Recreated' in compose_up.stderr"
+      when: llm_stack_start
+
+    - name: Wait for Langfuse to report healthy
+      uri:
+        url: http://127.0.0.1:3000/api/public/health
+      register: langfuse_health
+      retries: 30
+      delay: 5
+      until: langfuse_health.status == 200
+      when: llm_stack_start
+
+    - name: Read Langfuse public key
+      shell: grep '^LANGFUSE_INIT_PROJECT_PUBLIC_KEY=' {{ playbook_dir }}/.env | cut -d= -f2
+      register: langfuse_pk
+      changed_when: false
+
+    # ── Summary ────────────────────────────────────────────────────────────────
+
+    - name: Print completion summary
+      debug:
+        msg:
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - " LLM stack ready"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - " Ollama:     http://localhost:11434   models: {{ ollama_models | join(', ') }}"
+          - " Langfuse:   http://localhost:3000    {{ '' if llm_stack_start else '(not started)' }}"
+          - " Login:      {{ langfuse_admin_email }} / password in {{ playbook_dir }}/.env"
+          - " OTLP:       http://localhost:3000/api/public/otel"
+          - " Public key: {{ langfuse_pk.stdout }}"
+          - " Secret key: LANGFUSE_INIT_PROJECT_SECRET_KEY in .env"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - " Stop:  cd {{ playbook_dir }} && docker compose stop"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
