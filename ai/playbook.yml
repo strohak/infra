@@ -6,9 +6,9 @@
 #   As root:       drop -K
 #
 # Order matters: host_facts detects the host; inference picks models and runs
-# the chosen backend; qdrant starts the vector DB; ai_endpoints writes
-# /etc/ai-stack/endpoints.env; inference_verify checks the contract through
-# that file only.
+# the chosen backend; qdrant starts the vector DB; open_webui the chat UI;
+# ai_endpoints writes /etc/ai-stack/endpoints.env; inference_verify checks the
+# contract through that file only.
 
 - name: Local AI stack
   hosts: all
@@ -16,11 +16,18 @@
     - host_facts
     - inference
     - qdrant
+    - role: open_webui
+      when: open_webui_enabled | default(true) | bool
     - ai_endpoints
     - inference_verify
 
   post_tasks:
     - name: Print summary
+      vars:
+        model_summary: >-
+          {{ inference_model_roles | map('extract', inference_aliases)
+             | zip(inference_model_roles | map('extract', inference_models))
+             | map('join', '=') | join('  ') }}
       ansible.builtin.debug:
         msg:
           - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -28,7 +35,8 @@
           - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           - " Host:       {{ ai_platform }} / {{ ai_accelerator }} / {{ ai_vram_mb }} MiB VRAM → tier {{ inference_tier_name }}"
           - " Inference:  {{ inference_backend }} @ {{ inference_base_url }} (service: ai-inference)"
-          - " Models:     chat={{ inference_models.chat }} fast={{ inference_models.fast }} embed={{ inference_models.embed }}"
+          - " Models:     {{ model_summary }}"
           - " Qdrant:     {{ qdrant_url }}/dashboard  (gRPC {{ qdrant_grpc }})"
+          - " Open WebUI: {{ open_webui_url | default('disabled') }}  (first account you create is admin)"
           - " Endpoints:  {{ ai_endpoints_dir }}/endpoints.env"
           - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

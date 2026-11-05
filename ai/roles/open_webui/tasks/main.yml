@@ -1,0 +1,91 @@
+---
+# open_webui — Open WebUI chat UI in Podman, wired to the stack's contract:
+#   - models come from the OpenAI-compatible endpoint (inference_base_url),
+#     using the stable aliases, so swapping the backend needs no UI changes;
+#     Open WebUI's Ollama-specific integration is turned off on purpose
+#   - document search (RAG) stores vectors in our Qdrant, under a collection
+#     prefix that includes the embedding model
+#   - MCP tool servers listed in open_webui_mcp_servers are registered at first start
+#
+# It runs with host networking so it can reach the loopback-bound inference
+# server and Qdrant; HOST/PORT keep Open WebUI itself on open_webui_bind_address.
+
+- name: Set Open WebUI facts
+  ansible.builtin.set_fact:
+    open_webui_client_address: >-
+      {{ '127.0.0.1' if open_webui_bind_address in ['0.0.0.0', '::', ''] else open_webui_bind_address }}
+    open_webui_unit_template: "{{ role_path }}/templates/open-webui.container.j2"
+    open_webui_env_file: "{{ ai_config_dir }}/open-webui.env"
+    open_webui_secret_file: "{{ ai_config_dir }}/open-webui-secret-key"
+    # Same naming rule as everywhere: vectors are tied to the embedding model.
+    open_webui_qdrant_prefix: >-
+      open-webui__{{ inference_models.embed | regex_replace('[^A-Za-z0-9]+', '-') }}__{{ inference_embed_dims }}
+
+# Open WebUI's tool-server connection format (see its routers/configs.py).
+# No access grants = admin-only.
+- name: Build MCP tool server connections
+  ansible.builtin.set_fact:
+    open_webui_tool_connections: >-
+      {{ open_webui_tool_connections | default([]) + [{
+           'type': 'mcp',
+           'url': item.url,
+           'path': '',
+           'auth_type': 'bearer' if (item.token | default('') | length > 0) else 'none',
+           'key': item.token | default(''),
+           'config': {'enable': true},
+           'info': {'id': item.id, 'name': item.name | default(item.id),
+                    'description': item.description | default('')}
+         }] }}
+  loop: "{{ open_webui_mcp_servers }}"
+  loop_control:
+    label: "{{ item.id }}"
+  no_log: true
+
+- name: Default to no tool servers
+  ansible.builtin.set_fact:
+    open_webui_tool_connections: []
+  when: open_webui_mcp_servers | length == 0
+
+- name: Create config directory
+  become: "{{ not ai_become }}"
+  ansible.builtin.file:
+    path: "{{ ai_config_dir }}"
+    state: directory
+    mode: "0700"
+
+# Generated once on the host and kept, so sessions survive restarts and upgrades.
+- name: Generate Open WebUI secret key
+  become: "{{ not ai_become }}"
+  ansible.builtin.shell: "umask 077 && openssl rand -hex 32 > {{ open_webui_secret_file }}"
+  args:
+    creates: "{{ open_webui_secret_file }}"
+
+- name: Read Open WebUI secret key
+  become: "{{ not ai_become }}"
+  ansible.builtin.slurp:
+    src: "{{ open_webui_secret_file }}"
+  register: open_webui_secret
+  no_log: true
+
+- name: Write Open WebUI secrets env file
+  become: "{{ not ai_become }}"
+  ansible.builtin.template:
+    src: open-webui.env.j2
+    dest: "{{ open_webui_env_file }}"
+    mode: "0600"
+  register: open_webui_env_written
+  no_log: true
+
+- name: Run Open WebUI
+  ansible.builtin.include_role:
+    name: podman_service
+  vars:
+    podman_service_name: open-webui
+    podman_service_template: "{{ open_webui_unit_template }}"
+    podman_service_health_url: "http://{{ open_webui_client_address }}:{{ open_webui_port }}/health"
+    podman_service_ready_retries: "{{ open_webui_ready_retries }}"
+    podman_service_extra_changed: "{{ open_webui_env_written.changed }}"
+
+- name: Publish Open WebUI endpoint
+  ansible.builtin.set_fact:
+    open_webui_url: "http://{{ open_webui_client_address }}:{{ open_webui_port }}"

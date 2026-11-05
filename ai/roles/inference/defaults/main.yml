@@ -46,7 +46,8 @@ ai_model_tiers:
     min_vram_mb: 7500
     models:
       chat: { ollama: "qwen3:8b" }
-      fast: { ollama: "gemma4:e4b" }
+      # ~2.6 GB, so chat (~5.2 GB) + fast + embed all stay loaded on a 12 GB card
+      fast: { ollama: "qwen3:4b" }
       embed: { ollama: "nomic-embed-text:latest", dims: 768 }
   - name: cpu
     min_vram_mb: 0
@@ -59,3 +60,8 @@ inference_model_roles:
   - chat
   - fast
   - embed
+
+# Every backend serves each role under a stable alias, <name>:<role>
+# (ai:chat, ai:fast, ai:embed). Clients, Open WebUI and tools use the alias, so
+# changing a tier's model or the backend never changes what they ask for.
+inference_alias_name: ai

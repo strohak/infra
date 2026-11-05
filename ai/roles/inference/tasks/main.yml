@@ -7,6 +7,8 @@
 # 3. Runs roles/inference_<backend>.
 # 4. Checks the backend kept its side of the contract by setting
 #    inference_base_url (OpenAI-compatible /v1 root) and inference_health_url.
+#    The backend must also serve each role under inference_aliases (ai:chat...);
+#    inference_verify checks that.
 
 - name: Check the inference backend is supported
   ansible.builtin.assert:
@@ -57,6 +59,9 @@
                     | map('extract', inference_models_spec)
                     | map(attribute=inference_backend))) }}
     inference_embed_dims: "{{ inference_models_spec.embed.dims | int }}"
+    inference_aliases: >-
+      {{ dict(inference_model_roles
+              | zip(inference_model_roles | map('regex_replace', '^', inference_alias_name + ':'))) }}
 
 # Address local clients use: a wildcard bind is still reached via loopback.
 - name: Set local client address
@@ -70,6 +75,7 @@
       backend={{ inference_backend }} tier={{ inference_tier_name }}
       chat={{ inference_models.chat }} fast={{ inference_models.fast }}
       embed={{ inference_models.embed }} ({{ inference_embed_dims }} dims)
+      served as {{ inference_aliases.values() | join(', ') }}
 
 - name: Run inference backend
   ansible.builtin.include_role:

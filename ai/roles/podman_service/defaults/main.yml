@@ -1,0 +1,7 @@
+---
+# Inputs (set by the calling role through include_role vars):
+#   podman_service_name        unit name without suffix, e.g. "qdrant"
+#   podman_service_template    absolute path to the .container Jinja template
+#   podman_service_health_url  URL that returns 200 when the service is ready ("" to skip)
+podman_service_health_url: ""
+podman_service_ready_retries: 60   # x 5s; first start pulls the image

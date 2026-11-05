@@ -410,6 +410,7 @@
         - host_facts
         - inference
         - qdrant
+        - open_webui
         - ai_endpoints
         - inference_verify
       when: ai_stack_enabled | default(false) | bool

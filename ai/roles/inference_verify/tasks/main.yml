@@ -33,6 +33,7 @@
         - AI_MODEL_CHAT
         - AI_MODEL_FAST
         - AI_MODEL_EMBED
+        - AI_MODEL_EMBED_SOURCE
         - AI_EMBED_DIMS
         - QDRANT_URL
 
@@ -170,7 +171,7 @@
     - name: Name the scratch collection
       ansible.builtin.set_fact:
         inference_verify_collection: >-
-          ai_stack_verify__{{ inference_verify_env.AI_MODEL_EMBED | regex_replace('[^A-Za-z0-9]+', '-') }}__{{ inference_verify_env.AI_EMBED_DIMS }}
+          ai_stack_verify__{{ inference_verify_env.AI_MODEL_EMBED_SOURCE | regex_replace('[^A-Za-z0-9]+', '-') }}__{{ inference_verify_env.AI_EMBED_DIMS }}
 
     - name: "Qdrant: store and search a vector"
       block:

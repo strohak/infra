@@ -1,17 +1,5 @@
 ---
-# qdrant — Qdrant vector DB in Podman, run by systemd through a Quadlet unit.
-#
-# As a normal user it runs rootless (unit in ~/.config/containers/systemd,
-# systemd --user, linger enabled so it starts at boot without a login).
-# As root it runs as a system service from /etc/containers/systemd.
-
-- name: Require systemd
-  ansible.builtin.fail:
-    msg: >-
-      Qdrant runs as a systemd (Quadlet) service, but systemd is not running here.
-      {{ 'On WSL2 set [boot] systemd=true in /etc/wsl.conf, run `wsl --shutdown`
-      and re-run.' if ai_platform == 'wsl' else '' }}
-  when: not ai_init_systemd
+# qdrant — Qdrant vector DB in Podman (see roles/podman_service for how it runs).
 
 - name: Require an API key when Qdrant is reachable from other machines
   ansible.builtin.assert:
@@ -21,70 +9,20 @@
       network. Set qdrant_api_key (from ansible-vault) or bind to 127.0.0.1.
     quiet: true
 
-- name: Install Podman
-  become: "{{ ai_become }}"
-  ansible.builtin.apt:
-    name: podman
-    state: present
-    update_cache: true
-    cache_valid_time: 3600
-
-- name: Set Quadlet scope
+- name: Set Qdrant addresses
   ansible.builtin.set_fact:
-    qdrant_rootless: "{{ ai_become }}"
-    qdrant_unit_dir: >-
-      {{ ai_home + '/.config/containers/systemd' if ai_become else '/etc/containers/systemd' }}
     qdrant_client_address: >-
       {{ '127.0.0.1' if qdrant_bind_address in ['0.0.0.0', '::', ''] else qdrant_bind_address }}
+    qdrant_unit_template: "{{ role_path }}/templates/qdrant.container.j2"
 
-# Without linger, a rootless user's services stop when they log out and don't
-# start at boot.
-- name: Enable linger for {{ ai_user }}
-  become: true
-  ansible.builtin.command: "loginctl enable-linger {{ ai_user }}"
-  args:
-    creates: "/var/lib/systemd/linger/{{ ai_user }}"
-  when: qdrant_rootless
-
-- name: Create Quadlet directory
-  become: "{{ not qdrant_rootless }}"
-  ansible.builtin.file:
-    path: "{{ qdrant_unit_dir }}"
-    state: directory
-    mode: "0755"
-
-# 0600 because the unit can contain the API key.
-- name: Install Qdrant Quadlet unit
-  become: "{{ not qdrant_rootless }}"
-  ansible.builtin.template:
-    src: qdrant.container.j2
-    dest: "{{ qdrant_unit_dir }}/qdrant.container"
-    mode: "0600"
-  notify: Restart qdrant
-
-- name: Apply pending service changes
-  ansible.builtin.meta: flush_handlers
-
-# Quadlet units are generated at daemon-reload, so they can't be "enabled";
-# [Install] WantedBy in the unit makes them start at boot instead.
-- name: Start Qdrant
-  become: "{{ not qdrant_rootless }}"
-  ansible.builtin.systemd_service:
-    name: qdrant.service
-    scope: "{{ 'user' if qdrant_rootless else 'system' }}"
-    daemon_reload: true
-    state: started
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ ai_uid }}"
-
-- name: Wait for Qdrant to be ready
-  ansible.builtin.uri:
-    url: "http://{{ qdrant_client_address }}:{{ qdrant_http_port }}/readyz"
-    status_code: 200
-  register: qdrant_ready
-  until: qdrant_ready.status == 200
-  retries: "{{ qdrant_ready_retries }}"
-  delay: 5
+- name: Run Qdrant
+  ansible.builtin.include_role:
+    name: podman_service
+  vars:
+    podman_service_name: qdrant
+    podman_service_template: "{{ qdrant_unit_template }}"
+    podman_service_health_url: "http://{{ qdrant_client_address }}:{{ qdrant_http_port }}/readyz"
+    podman_service_ready_retries: "{{ qdrant_ready_retries }}"
 
 - name: Publish Qdrant endpoints
   ansible.builtin.set_fact:

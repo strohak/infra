@@ -1,0 +1,58 @@
+# {{ ansible_managed }}
+# Source: ai/roles/open_webui. Podman Quadlet unit, turned into open-webui.service by systemd.
+#
+# Most settings below seed Open WebUI's database on FIRST start only; after
+# that, Admin Settings in the UI win. Because models are addressed by stable
+# aliases (ai:chat...), they rarely need changing.
+[Unit]
+Description=Open WebUI
+Wants=network-online.target
+After=network-online.target ai-inference.service qdrant.service
+
+[Container]
+ContainerName=open-webui
+Image={{ open_webui_image }}:{{ open_webui_version }}
+Network=host
+Volume={{ open_webui_volume }}:/app/backend/data
+EnvironmentFile={{ open_webui_env_file }}
+
+# Listen address (host networking)
+Environment=HOST={{ open_webui_bind_address }}
+Environment=PORT={{ open_webui_port }}
+
+# Models: the contract's OpenAI-compatible endpoint only
+Environment=ENABLE_OLLAMA_API=false
+Environment=OPENAI_API_BASE_URL={{ inference_base_url }}
+Environment=OPENAI_API_KEY=local
+Environment=DEFAULT_MODELS={{ inference_aliases.chat }}
+Environment=TASK_MODEL_EXTERNAL={{ inference_aliases.fast }}
+
+# Document search (RAG): our embedding model + our Qdrant
+Environment=RAG_EMBEDDING_ENGINE=openai
+Environment=RAG_OPENAI_API_BASE_URL={{ inference_base_url }}
+Environment=RAG_OPENAI_API_KEY=local
+Environment=RAG_EMBEDDING_MODEL={{ inference_aliases.embed }}
+Environment=VECTOR_DB=qdrant
+Environment=QDRANT_URI={{ qdrant_url }}
+Environment=QDRANT_COLLECTION_PREFIX={{ open_webui_qdrant_prefix }}
+
+# Logins on; new sign-ups wait for admin approval
+Environment=WEBUI_AUTH=true
+Environment=DEFAULT_USER_ROLE=pending
+
+# No telemetry or update pings
+Environment=ANONYMIZED_TELEMETRY=false
+Environment=DO_NOT_TRACK=true
+Environment=SCARF_NO_ANALYTICS=true
+Environment=ENABLE_VERSION_UPDATE_CHECK=false
+{% for key, value in open_webui_env_extra | dictsort %}
+Environment={{ key }}={{ value }}
+{% endfor %}
+
+[Service]
+Restart=always
+# The first start pulls a multi-GB image.
+TimeoutStartSec=1800
+
+[Install]
+WantedBy={{ 'default.target' if podman_service_rootless else 'multi-user.target' }}

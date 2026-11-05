@@ -22,4 +22,4 @@ Restart=always
 TimeoutStartSec=900
 
 [Install]
-WantedBy={{ 'default.target' if qdrant_rootless else 'multi-user.target' }}
+WantedBy={{ 'default.target' if podman_service_rootless else 'multi-user.target' }}

@@ -9,6 +9,7 @@
 #   ai_arch          amd64 | arm64 (Debian naming)
 #   ai_become        true when tasks need sudo (i.e. not already root)
 #   ai_user / ai_uid / ai_home
+#   ai_config_dir    secrets/env files (~/.config/ai-stack, or /etc/ai-stack as root)
 
 - name: Check this OS family is supported
   ansible.builtin.assert:
@@ -46,6 +47,11 @@
     ai_user: "{{ ansible_facts['user_id'] }}"
     ai_uid: "{{ ansible_facts['effective_user_id'] }}"
     ai_home: "{{ ansible_facts['env']['HOME'] }}"
+    # Where per-install secrets/env files live: the user's config dir when
+    # running rootless, /etc/ai-stack as root.
+    ai_config_dir: >-
+      {{ ansible_facts['env']['HOME'] + '/.config/ai-stack'
+         if ansible_facts['effective_user_id'] != 0 else '/etc/ai-stack' }}
 
 # On WSL2, nvidia-smi comes from the Windows driver and lives in /usr/lib/wsl/lib,
 # which is not always on PATH for non-interactive shells.

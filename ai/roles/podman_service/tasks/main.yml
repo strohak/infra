@@ -1,0 +1,96 @@
+---
+# podman_service — run one container as a systemd service through a Podman
+# Quadlet unit. Shared by every container role (qdrant, open_webui, and your
+# own tools later), so the root/rootless handling lives in one place.
+#
+# As a normal user it runs rootless: unit in ~/.config/containers/systemd,
+# managed by `systemd --user`, with linger so it starts at boot without a login.
+# As root it is a system service from /etc/containers/systemd.
+#
+# Facts it sets for the caller: podman_service_rootless, podman_service_unit_dir,
+# podman_service_config_dir (where callers keep env files with secrets).
+
+- name: Require systemd for {{ podman_service_name }}
+  ansible.builtin.fail:
+    msg: >-
+      {{ podman_service_name }} runs as a systemd (Quadlet) service, but systemd is
+      not running here.
+      {{ 'On WSL2 set [boot] systemd=true in /etc/wsl.conf, run `wsl --shutdown`
+      and re-run.' if ai_platform == 'wsl' else '' }}
+  when: not ai_init_systemd
+
+- name: Install Podman
+  become: "{{ ai_become }}"
+  ansible.builtin.apt:
+    name: podman
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Set Quadlet scope
+  ansible.builtin.set_fact:
+    podman_service_rootless: "{{ ai_become }}"
+    podman_service_unit_dir: >-
+      {{ ai_home + '/.config/containers/systemd' if ai_become else '/etc/containers/systemd' }}
+    podman_service_config_dir: "{{ ai_config_dir }}"
+
+# Without linger, a rootless user's services stop at logout and don't start at boot.
+- name: Enable linger for {{ ai_user }}
+  become: true
+  ansible.builtin.command: "loginctl enable-linger {{ ai_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ ai_user }}"
+  when: podman_service_rootless
+
+# Linger starts the user's systemd instance asynchronously; `systemctl --user`
+# fails until its bus socket exists.
+- name: Wait for the user systemd instance
+  ansible.builtin.wait_for:
+    path: "/run/user/{{ ai_uid }}/bus"
+    timeout: 60
+  when: podman_service_rootless
+
+- name: Create Quadlet and config directories
+  become: "{{ not podman_service_rootless }}"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0700"
+  loop:
+    - "{{ podman_service_unit_dir }}"
+    - "{{ podman_service_config_dir }}"
+
+# Callers that keep secrets write an env file into podman_service_config_dir
+# and reference it with EnvironmentFile=; set podman_service_extra_changed when
+# that file changed so the service restarts.
+- name: Install Quadlet unit for {{ podman_service_name }}
+  become: "{{ not podman_service_rootless }}"
+  ansible.builtin.template:
+    src: "{{ podman_service_template }}"
+    dest: "{{ podman_service_unit_dir }}/{{ podman_service_name }}.container"
+    mode: "0600"
+  register: podman_service_unit
+
+# Quadlet units are generated at daemon-reload, so they can't be "enabled";
+# [Install] WantedBy in the unit starts them at boot instead.
+- name: Start {{ podman_service_name }}
+  become: "{{ not podman_service_rootless }}"
+  ansible.builtin.systemd_service:
+    name: "{{ podman_service_name }}.service"
+    scope: "{{ 'user' if podman_service_rootless else 'system' }}"
+    daemon_reload: true
+    state: >-
+      {{ 'restarted' if podman_service_unit.changed or (podman_service_extra_changed | default(false) | bool)
+         else 'started' }}
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ ai_uid }}"
+
+- name: Wait until ready ({{ podman_service_name }})
+  ansible.builtin.uri:
+    url: "{{ podman_service_health_url }}"
+    status_code: 200
+  register: podman_service_ready
+  until: podman_service_ready.status == 200
+  retries: "{{ podman_service_ready_retries }}"
+  delay: 5
+  when: podman_service_health_url | length > 0

@@ -1,0 +1,26 @@
+---
+open_webui_enabled: true
+open_webui_version: "v0.12.5"   # Update this when upgrading Open WebUI (data volume is kept)
+open_webui_image: ghcr.io/open-webui/open-webui
+
+# Open WebUI has its own logins, but the first account created becomes admin:
+# create yours right after the first start, especially on a non-loopback bind.
+open_webui_bind_address: 127.0.0.1
+open_webui_port: 3000
+open_webui_volume: open-webui-data
+open_webui_ready_retries: 180   # x 5s; the image is several GB on first pull
+
+# MCP tool servers to register on FIRST start (Open WebUI keeps its settings in
+# its database afterwards; change them in Admin Settings → External Tools).
+# Only Streamable HTTP MCP servers connect directly. Without access grants a
+# server is admin-only, which suits a personal install.
+#   - id: notes                               # unique, no spaces
+#     name: Notes
+#     description: Store and search personal notes in Qdrant
+#     url: http://127.0.0.1:8765/mcp
+#     token: "{{ vault_mcp_notes_token }}"    # optional bearer token
+open_webui_mcp_servers: []
+
+# Extra Open WebUI environment variables, merged last (plain values only;
+# secrets belong in the env file template).
+open_webui_env_extra: {}

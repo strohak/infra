@@ -136,6 +136,35 @@
   async: "{{ ollama_pull_timeout }}"
   poll: 10
 
+# ── Stable aliases (contract: serve each role as e.g. ai:chat) ────────────────
+# `ollama cp` copies only the manifest, so an alias costs no disk and shares
+# the source's ID in `ollama list`. Comparing IDs makes this idempotent and
+# re-points an alias when a tier's model changes.
+
+- name: List models after pulls
+  ansible.builtin.command: ollama list
+  environment:
+    OLLAMA_HOST: "{{ inference_client_address }}:{{ inference_port }}"
+  register: inference_ollama_list_after
+  changed_when: false
+
+# `ollama list` columns: NAME ID SIZE MODIFIED (first line is the header).
+- name: Map model names to IDs
+  vars:
+    rows: "{{ inference_ollama_list_after.stdout_lines[1:] | map('split') | select | list }}"
+  ansible.builtin.set_fact:
+    inference_ollama_ids: "{{ dict(rows | map('first') | zip(rows | map(attribute='1'))) }}"
+
+- name: Point aliases at their models
+  ansible.builtin.command: "ollama cp {{ inference_models[item] }} {{ inference_aliases[item] }}"
+  environment:
+    OLLAMA_HOST: "{{ inference_client_address }}:{{ inference_port }}"
+  loop: "{{ inference_model_roles }}"
+  when: >-
+    inference_ollama_ids[inference_aliases[item]] | default('missing')
+    != inference_ollama_ids[inference_models[item]] | default('unknown')
+  changed_when: true
+
 # ── Contract outputs ───────────────────────────────────────────────────────────
 
 - name: Publish endpoints
