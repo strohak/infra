@@ -1,0 +1,16 @@
+---
+qdrant_version: "v1.20.0"   # Update this when upgrading Qdrant (data volume is kept)
+qdrant_image: docker.io/qdrant/qdrant
+
+# Keep 127.0.0.1 unless other machines must reach it. Any other address
+# requires qdrant_api_key (Qdrant has no auth otherwise).
+qdrant_bind_address: 127.0.0.1
+qdrant_http_port: 6333   # REST API + web dashboard (/dashboard)
+qdrant_grpc_port: 6334   # gRPC, used by the Go client
+
+# Leave empty for loopback-only hosts. For LAN servers, set it from
+# ansible-vault (see inventory/group_vars/ai_servers.yml).
+qdrant_api_key: ""
+
+qdrant_volume: qdrant-data
+qdrant_ready_retries: 60   # x 5s; the first run pulls the image

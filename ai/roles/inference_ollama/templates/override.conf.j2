@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Source: ai/roles/inference_ollama — edit ollama_env there, not here.
+[Service]
+Environment="OLLAMA_HOST={{ inference_bind_address }}:{{ inference_port }}"
+{% for key, value in ollama_env | dictsort %}
+Environment="{{ key }}={{ value }}"
+{% endfor %}

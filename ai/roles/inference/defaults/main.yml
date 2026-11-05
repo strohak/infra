@@ -1,0 +1,61 @@
+---
+# ── Backend selection ──────────────────────────────────────────────────────────
+# Which inference server implements the contract (see docs/ai-local-stack.md).
+# Each name maps to a role called inference_<name>.
+inference_backend: ollama
+inference_supported_backends:
+  - ollama
+
+# Address the server listens on. Keep 127.0.0.1 unless the host is meant to
+# serve other machines (see inventory/group_vars/ai_servers.yml).
+inference_bind_address: 127.0.0.1
+
+# Default port per backend; override inference_port to pin one.
+inference_default_ports:
+  ollama: 11434
+inference_port: "{{ inference_default_ports[inference_backend] }}"
+
+# ── Models ─────────────────────────────────────────────────────────────────────
+# Logical roles every backend must serve:
+#   chat   main model for agents and tool calling
+#   fast   smaller/faster model for quick tasks (summaries, classification)
+#   embed  embedding model for RAG; `dims` is its vector size
+# Each role maps backend name -> that backend's model id. A backend only reads
+# its own column, so adding a backend means adding a column here.
+#
+# The first tier whose min_vram_mb fits the detected GPU wins; CPU-only hosts
+# always get the `cpu` tier. Set `ai_models` (same shape as a tier's `models`)
+# in inventory to skip tier selection entirely.
+#
+# Model ids are written with an explicit tag (":latest" too) because the
+# contract check compares them exactly against what /v1/models reports.
+ai_model_tiers:
+  - name: 24gb
+    min_vram_mb: 23000
+    models:
+      chat: { ollama: "qwen3.6:27b" }
+      fast: { ollama: "qwen3:8b" }
+      embed: { ollama: "nomic-embed-text:latest", dims: 768 }
+  - name: 16gb
+    min_vram_mb: 15500
+    models:
+      chat: { ollama: "gpt-oss:20b" }
+      fast: { ollama: "qwen3:8b" }
+      embed: { ollama: "nomic-embed-text:latest", dims: 768 }
+  - name: 8gb
+    min_vram_mb: 7500
+    models:
+      chat: { ollama: "qwen3:8b" }
+      fast: { ollama: "gemma4:e4b" }
+      embed: { ollama: "nomic-embed-text:latest", dims: 768 }
+  - name: cpu
+    min_vram_mb: 0
+    models:
+      chat: { ollama: "qwen3:4b" }
+      fast: { ollama: "qwen3:4b" }
+      embed: { ollama: "nomic-embed-text:latest", dims: 768 }
+
+inference_model_roles:
+  - chat
+  - fast
+  - embed

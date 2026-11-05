@@ -1,0 +1,38 @@
+---
+# ai_endpoints — write the file every consumer (the harness, scripts, shells)
+# reads to find the stack. Consumers must use only these values and the
+# OpenAI-compatible API behind AI_INFERENCE_BASE_URL, never a backend's own API.
+# That is what lets the inference backend be swapped without touching them.
+
+- name: Create {{ ai_endpoints_dir }}
+  become: "{{ ai_become }}"
+  ansible.builtin.file:
+    path: "{{ ai_endpoints_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Write endpoints file
+  become: "{{ ai_become }}"
+  ansible.builtin.template:
+    src: endpoints.env.j2
+    dest: "{{ ai_endpoints_dir }}/endpoints.env"
+    mode: "0644"
+
+# The key is kept out of endpoints.env so that file can stay world-readable.
+- name: Write Qdrant API key file
+  become: "{{ ai_become }}"
+  ansible.builtin.copy:
+    content: "{{ qdrant_api_key }}\n"
+    dest: "{{ ai_endpoints_dir }}/qdrant-api-key"
+    owner: root
+    group: "{{ ansible_facts['user_gid'] }}"
+    mode: "0640"
+  no_log: true
+  when: qdrant_api_key | default('') | length > 0
+
+- name: Remove stale Qdrant API key file
+  become: "{{ ai_become }}"
+  ansible.builtin.file:
+    path: "{{ ai_endpoints_dir }}/qdrant-api-key"
+    state: absent
+  when: qdrant_api_key | default('') | length == 0

@@ -1,0 +1,34 @@
+---
+# ai/playbook.yml — local AI stack: inference server + Qdrant, on any host type.
+#
+#   This machine:  ansible-playbook -i ai/inventory/hosts.yml ai/playbook.yml --limit localhost -K
+#   A server:      ansible-playbook -i ai/inventory/hosts.yml ai/playbook.yml --limit gpu-box -K
+#   As root:       drop -K
+#
+# Order matters: host_facts detects the host; inference picks models and runs
+# the chosen backend; qdrant starts the vector DB; ai_endpoints writes
+# /etc/ai-stack/endpoints.env; inference_verify checks the contract through
+# that file only.
+
+- name: Local AI stack
+  hosts: all
+  roles:
+    - host_facts
+    - inference
+    - qdrant
+    - ai_endpoints
+    - inference_verify
+
+  post_tasks:
+    - name: Print summary
+      ansible.builtin.debug:
+        msg:
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - " AI stack ready on {{ inventory_hostname }}"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          - " Host:       {{ ai_platform }} / {{ ai_accelerator }} / {{ ai_vram_mb }} MiB VRAM → tier {{ inference_tier_name }}"
+          - " Inference:  {{ inference_backend }} @ {{ inference_base_url }} (service: ai-inference)"
+          - " Models:     chat={{ inference_models.chat }} fast={{ inference_models.fast }} embed={{ inference_models.embed }}"
+          - " Qdrant:     {{ qdrant_url }}/dashboard  (gRPC {{ qdrant_grpc }})"
+          - " Endpoints:  {{ ai_endpoints_dir }}/endpoints.env"
+          - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

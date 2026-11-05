@@ -1,0 +1,14 @@
+---
+ollama_version: "0.40.14"   # Update this when upgrading Ollama
+ollama_install_script_url: https://ollama.com/install.sh
+
+# Server-side tuning, written into the systemd drop-in. These live in the
+# service config (not in API requests) so clients stay backend-neutral.
+ollama_env:
+  OLLAMA_CONTEXT_LENGTH: "16384"   # default context for every request
+  OLLAMA_FLASH_ATTENTION: "1"      # needed for a quantized KV cache
+  OLLAMA_KV_CACHE_TYPE: "q8_0"     # ~half the KV-cache memory of f16
+  OLLAMA_KEEP_ALIVE: "30m"         # keep models loaded between requests
+
+# How long to wait for a model download (seconds); big models are 5-20 GB.
+ollama_pull_timeout: 3600

@@ -1,0 +1,89 @@
+---
+# host_facts — detect what kind of host this is. Changes nothing on the host.
+#
+# Sets (used by every other ai/ role):
+#   ai_platform      wsl | container | baremetal
+#   ai_init_systemd  true when PID 1 is systemd
+#   ai_accelerator   nvidia | amd | cpu
+#   ai_vram_mb       largest single GPU's VRAM in MiB (0 for cpu)
+#   ai_arch          amd64 | arm64 (Debian naming)
+#   ai_become        true when tasks need sudo (i.e. not already root)
+#   ai_user / ai_uid / ai_home
+
+- name: Check this OS family is supported
+  ansible.builtin.assert:
+    that: ansible_facts['os_family'] in host_facts_supported_os_families
+    fail_msg: >-
+      OS family '{{ ansible_facts['os_family'] }}' is not supported yet
+      (supported: {{ host_facts_supported_os_families | join(', ') }}).
+      Add roles/host_facts/tasks/{{ ansible_facts['os_family'] | lower }}.yml
+      and matching install tasks in each role to support it.
+    quiet: true
+
+- name: Run OS-family specific detection
+  ansible.builtin.include_tasks: "{{ ansible_facts['os_family'] | lower }}.yml"
+
+- name: Look for container marker files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /.dockerenv
+    - /run/.containerenv
+  register: host_facts_container_markers
+
+# WSL kernels are tagged e.g. "6.6.36.6-microsoft-standard-WSL2". A WSL check
+# comes first because WSL distros can also look like containers.
+- name: Detect platform and user
+  ansible.builtin.set_fact:
+    ai_platform: >-
+      {{ 'wsl' if 'microsoft' in ansible_facts['kernel'] | lower
+         else 'container' if (host_facts_container_markers.results | selectattr('stat.exists') | list | length > 0)
+                             or ansible_facts['virtualization_role'] == 'guest'
+                                and ansible_facts['virtualization_type'] in host_facts_container_types
+         else 'baremetal' }}
+    ai_init_systemd: "{{ ansible_facts['service_mgr'] == 'systemd' }}"
+    ai_become: "{{ ansible_facts['effective_user_id'] != 0 }}"
+    ai_user: "{{ ansible_facts['user_id'] }}"
+    ai_uid: "{{ ansible_facts['effective_user_id'] }}"
+    ai_home: "{{ ansible_facts['env']['HOME'] }}"
+
+# On WSL2, nvidia-smi comes from the Windows driver and lives in /usr/lib/wsl/lib,
+# which is not always on PATH for non-interactive shells.
+- name: Query NVIDIA GPUs
+  ansible.builtin.command: nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits
+  environment:
+    PATH: "/usr/lib/wsl/lib:{{ ansible_facts['env']['PATH'] }}"
+  register: host_facts_nvidia
+  changed_when: false
+  failed_when: false
+
+- name: Check for the AMD ROCm kernel device
+  ansible.builtin.stat:
+    path: /dev/kfd
+  register: host_facts_kfd
+
+- name: Read AMD GPU VRAM sizes
+  ansible.builtin.shell: cat /sys/class/drm/card*/device/mem_info_vram_total 2>/dev/null || true
+  register: host_facts_amd_vram
+  changed_when: false
+  when: host_facts_kfd.stat.exists and host_facts_nvidia.rc != 0
+
+- name: Detect accelerator
+  ansible.builtin.set_fact:
+    ai_accelerator: >-
+      {{ 'nvidia' if host_facts_nvidia.rc == 0
+         else 'amd' if host_facts_kfd.stat.exists
+         else 'cpu' }}
+    # Use the largest single card: models are sized to fit one GPU.
+    ai_vram_mb: >-
+      {{ (host_facts_nvidia.stdout_lines | map('trim') | map('int') | max)
+           if host_facts_nvidia.rc == 0 and host_facts_nvidia.stdout_lines | length > 0
+         else ((host_facts_amd_vram.stdout_lines | map('int') | max) // 1048576)
+           if (host_facts_amd_vram.stdout_lines | default([]) | length > 0)
+         else 0 }}
+
+- name: Report detected host
+  ansible.builtin.debug:
+    msg: >-
+      {{ ai_platform }} / {{ ai_accelerator }} / {{ ai_vram_mb }} MiB VRAM /
+      {{ ai_arch }} / systemd={{ ai_init_systemd }} / user={{ ai_user }}

@@ -1,0 +1,10 @@
+---
+# ansible-lint config for ai/
+skip_list:
+  # Roles here share a deliberate contract through host-wide facts:
+  #   ai_*         host facts and model selection (host_facts, inference)
+  #   inference_*  endpoint facts every backend role must set
+  #   qdrant_*     Qdrant settings/endpoints read by ai_endpoints
+  # Prefixing them with each role's own name would hide that contract.
+  # Role-internal variables still use their role's prefix.
+  - var-naming[no-role-prefix]

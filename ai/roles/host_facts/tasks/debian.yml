@@ -1,0 +1,9 @@
+---
+- name: Read dpkg architecture
+  ansible.builtin.command: dpkg --print-architecture
+  register: host_facts_dpkg_arch
+  changed_when: false
+
+- name: Set architecture
+  ansible.builtin.set_fact:
+    ai_arch: "{{ host_facts_dpkg_arch.stdout | trim }}"

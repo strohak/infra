@@ -1,0 +1,13 @@
+---
+# Each entry needs a tasks/<family>.yml here and install support in the roles.
+host_facts_supported_os_families:
+  - Debian
+
+# ansible_virtualization_type values that mean "running inside a container".
+host_facts_container_types:
+  - docker
+  - podman
+  - container
+  - containerd
+  - lxc
+  - systemd-nspawn

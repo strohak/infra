@@ -1,0 +1,7 @@
+---
+- name: Restart ollama
+  become: "{{ ai_become }}"
+  ansible.builtin.systemd_service:
+    name: ollama
+    daemon_reload: true
+    state: restarted

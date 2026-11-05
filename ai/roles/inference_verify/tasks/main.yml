@@ -1,0 +1,230 @@
+---
+# inference_verify — backend-neutral contract check.
+#
+# Reads ONLY the endpoints file and talks ONLY the OpenAI-compatible API and
+# Qdrant's REST API: exactly what the harness will do. A new inference backend
+# counts as "dropped in" once this passes against it.
+
+- name: Run contract check
+  when: inference_verify_enabled | bool
+  block:
+    - name: Read endpoints file
+      ansible.builtin.slurp:
+        src: "{{ inference_verify_endpoints_file }}"
+      register: inference_verify_file
+
+    - name: Parse endpoints file
+      # Double-quoted on purpose: inside a folded (>-) block the '\n' and
+      # group references below are escaped differently and the parse
+      # silently returns {}.
+      ansible.builtin.set_fact:
+        inference_verify_env: "{{ dict(inference_verify_file.content | b64decode | split('\n')
+          | select('match', '^[A-Z0-9_]+=')
+          | map('regex_search', '^([A-Z0-9_]+)=(.*)$', '\\1', '\\2')) }}"
+
+    - name: Check required endpoint keys
+      ansible.builtin.assert:
+        that: (inference_verify_env[item] | default('')) | length > 0
+        fail_msg: "{{ inference_verify_endpoints_file }} has no value for {{ item }}"
+        quiet: true
+      loop:
+        - AI_INFERENCE_BASE_URL
+        - AI_INFERENCE_HEALTH_URL
+        - AI_MODEL_CHAT
+        - AI_MODEL_FAST
+        - AI_MODEL_EMBED
+        - AI_EMBED_DIMS
+        - QDRANT_URL
+
+    - name: Read Qdrant API key
+      ansible.builtin.slurp:
+        src: "{{ inference_verify_env.QDRANT_API_KEY_FILE }}"
+      register: inference_verify_qdrant_key
+      no_log: true
+      when: inference_verify_env.QDRANT_API_KEY_FILE | default('') | length > 0
+
+    - name: Set request headers
+      ansible.builtin.set_fact:
+        inference_verify_qdrant_headers: >-
+          {{ {'api-key': inference_verify_qdrant_key.content | b64decode | trim}
+             if inference_verify_qdrant_key.content is defined else {} }}
+      no_log: true
+
+    # ── Inference ──────────────────────────────────────────────────────────────
+
+    - name: "Contract: health endpoint answers"
+      ansible.builtin.uri:
+        url: "{{ inference_verify_env.AI_INFERENCE_HEALTH_URL }}"
+        status_code: 200
+
+    - name: "Contract: GET /v1/models"
+      ansible.builtin.uri:
+        url: "{{ inference_verify_env.AI_INFERENCE_BASE_URL }}/models"
+        return_content: true
+      register: inference_verify_models
+
+    - name: "Contract: every configured model is served"
+      ansible.builtin.assert:
+        that: item in (inference_verify_models.json.data | map(attribute='id') | list)
+        fail_msg: >-
+          Model '{{ item }}' is not listed by /v1/models.
+          Served: {{ inference_verify_models.json.data | map(attribute='id') | join(', ') }}
+        quiet: true
+      loop:
+        - "{{ inference_verify_env.AI_MODEL_CHAT }}"
+        - "{{ inference_verify_env.AI_MODEL_FAST }}"
+        - "{{ inference_verify_env.AI_MODEL_EMBED }}"
+
+    - name: Check tool calling
+      block:
+        - name: "Contract: chat model calls a tool"
+          ansible.builtin.uri:
+            url: "{{ inference_verify_env.AI_INFERENCE_BASE_URL }}/chat/completions"
+            method: POST
+            body_format: json
+            timeout: "{{ inference_verify_timeout }}"
+            body:
+              model: "{{ inference_verify_env.AI_MODEL_CHAT }}"
+              messages:
+                - role: user
+                  content: "What is the weather in Paris right now? Use the get_weather tool."
+              tools:
+                - type: function
+                  function:
+                    name: get_weather
+                    description: Get the current weather for a city
+                    parameters:
+                      type: object
+                      properties:
+                        city: { type: string, description: City name }
+                      required: [city]
+            return_content: true
+          register: inference_verify_chat
+          until: >-
+            inference_verify_chat.json is defined and
+            (inference_verify_chat.json.choices[0].message.tool_calls | default([]) | length > 0) and
+            inference_verify_chat.json.choices[0].message.tool_calls[0].function.name == 'get_weather'
+          retries: "{{ inference_verify_tool_retries }}"
+          delay: 1
+      rescue:
+        - name: "Contract failed: no tool call"
+          ansible.builtin.fail:
+            msg: >-
+              Chat model '{{ inference_verify_env.AI_MODEL_CHAT }}' did not return a
+              get_weather tool call in {{ inference_verify_tool_retries }} tries. The
+              contract requires OpenAI-style tool_calls from /v1/chat/completions.
+              Last reply: {{ (inference_verify_chat.json.choices[0].message | default(inference_verify_chat.msg | default('none')))
+                             | string | truncate(300) }}
+
+    - name: "Contract: fast model answers"
+      ansible.builtin.uri:
+        url: "{{ inference_verify_env.AI_INFERENCE_BASE_URL }}/chat/completions"
+        method: POST
+        body_format: json
+        timeout: "{{ inference_verify_timeout }}"
+        body:
+          model: "{{ inference_verify_env.AI_MODEL_FAST }}"
+          messages:
+            - role: user
+              content: "Reply with the single word: ready"
+        return_content: true
+      register: inference_verify_fast
+
+    - name: "Contract: fast model returned text"
+      ansible.builtin.assert:
+        that: (inference_verify_fast.json.choices[0].message.content | default('')) | length > 0
+        fail_msg: "Fast model '{{ inference_verify_env.AI_MODEL_FAST }}' returned an empty reply."
+        quiet: true
+
+    - name: "Contract: embeddings have the declared size"
+      ansible.builtin.uri:
+        url: "{{ inference_verify_env.AI_INFERENCE_BASE_URL }}/embeddings"
+        method: POST
+        body_format: json
+        timeout: "{{ inference_verify_timeout }}"
+        body:
+          model: "{{ inference_verify_env.AI_MODEL_EMBED }}"
+          input: "The quick brown fox jumps over the lazy dog."
+        return_content: true
+      register: inference_verify_embed
+
+    - name: "Contract: embedding size matches AI_EMBED_DIMS"
+      ansible.builtin.assert:
+        that: (inference_verify_embed.json.data[0].embedding | default([]) | length) == (inference_verify_env.AI_EMBED_DIMS | int)
+        fail_msg: >-
+          Embedding model '{{ inference_verify_env.AI_MODEL_EMBED }}' returned
+          {{ inference_verify_embed.json.data[0].embedding | default([]) | length }} dimensions,
+          but the model set declares {{ inference_verify_env.AI_EMBED_DIMS }}. Fix `dims`
+          for this model in ai_model_tiers / ai_models.
+        quiet: true
+
+    # ── Qdrant: store the embedding and find it again (the RAG path) ──────────
+
+    - name: "Qdrant: ready"
+      ansible.builtin.uri:
+        url: "{{ inference_verify_env.QDRANT_URL }}/readyz"
+        status_code: 200
+
+    # Collection names carry model + size so a different embedding model can
+    # never be mixed into an existing index.
+    - name: Name the scratch collection
+      ansible.builtin.set_fact:
+        inference_verify_collection: >-
+          ai_stack_verify__{{ inference_verify_env.AI_MODEL_EMBED | regex_replace('[^A-Za-z0-9]+', '-') }}__{{ inference_verify_env.AI_EMBED_DIMS }}
+
+    - name: "Qdrant: store and search a vector"
+      block:
+        - name: "Qdrant: create collection"
+          ansible.builtin.uri:
+            url: "{{ inference_verify_env.QDRANT_URL }}/collections/{{ inference_verify_collection }}"
+            method: PUT
+            headers: "{{ inference_verify_qdrant_headers }}"
+            body_format: json
+            body:
+              vectors:
+                size: "{{ inference_verify_env.AI_EMBED_DIMS | int }}"
+                distance: Cosine
+
+        - name: "Qdrant: upsert the embedding"
+          ansible.builtin.uri:
+            url: "{{ inference_verify_env.QDRANT_URL }}/collections/{{ inference_verify_collection }}/points?wait=true"
+            method: PUT
+            headers: "{{ inference_verify_qdrant_headers }}"
+            body_format: json
+            body:
+              points:
+                - id: 1
+                  vector: "{{ inference_verify_embed.json.data[0].embedding }}"
+                  payload: { text: "The quick brown fox jumps over the lazy dog." }
+
+        - name: "Qdrant: nearest neighbour is the stored point"
+          ansible.builtin.uri:
+            url: "{{ inference_verify_env.QDRANT_URL }}/collections/{{ inference_verify_collection }}/points/query"
+            method: POST
+            headers: "{{ inference_verify_qdrant_headers }}"
+            body_format: json
+            body:
+              query: "{{ inference_verify_embed.json.data[0].embedding }}"
+              limit: 1
+              with_payload: true
+            return_content: true
+          register: inference_verify_search
+          failed_when: (inference_verify_search.json.result.points | default([]) | map(attribute='id') | list) != [1]
+      always:
+        - name: "Qdrant: delete scratch collection"
+          ansible.builtin.uri:
+            url: "{{ inference_verify_env.QDRANT_URL }}/collections/{{ inference_verify_collection }}"
+            method: DELETE
+            headers: "{{ inference_verify_qdrant_headers }}"
+            status_code: [200, 404]
+
+    - name: Contract check passed
+      vars:
+        call: "{{ inference_verify_chat.json.choices[0].message.tool_calls[0].function }}"
+      ansible.builtin.debug:
+        msg:
+          - "backend:   {{ inference_verify_env.AI_INFERENCE_BACKEND | default('?') }} @ {{ inference_verify_env.AI_INFERENCE_BASE_URL }}"
+          - "tool call: {{ inference_verify_env.AI_MODEL_CHAT }} → {{ call.name }}({{ call.arguments }})"
+          - "fast:      {{ inference_verify_env.AI_MODEL_FAST }} → {{ inference_verify_fast.json.choices[0].message.content | trim | truncate(40) }}"
+          - "embed:     {{ inference_verify_env.AI_MODEL_EMBED }} → {{ inference_verify_embed.json.data[0].embedding | length }} dims"
+          - "qdrant:    {{ inference_verify_env.QDRANT_URL }} store + search OK"

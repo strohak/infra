@@ -1,0 +1,12 @@
+---
+# Settings for every host. Role defaults (ai/roles/*/defaults/main.yml) hold the
+# full list of knobs; only overrides go here.
+
+inference_backend: ollama
+
+# Uncomment to skip VRAM-based tier selection and pin models yourself.
+# Same shape as a tier's `models` in ai/roles/inference/defaults/main.yml.
+# ai_models:
+#   chat:  { ollama: "qwen3:8b" }
+#   fast:  { ollama: "gemma4:e4b" }
+#   embed: { ollama: "nomic-embed-text:latest", dims: 768 }

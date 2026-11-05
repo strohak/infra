@@ -1,0 +1,87 @@
+---
+# inference — backend-neutral dispatcher.
+#
+# 1. Checks the requested backend exists.
+# 2. Picks the model set (tier by VRAM, or the ai_models override) and resolves
+#    each logical role to this backend's model id.
+# 3. Runs roles/inference_<backend>.
+# 4. Checks the backend kept its side of the contract by setting
+#    inference_base_url (OpenAI-compatible /v1 root) and inference_health_url.
+
+- name: Check the inference backend is supported
+  ansible.builtin.assert:
+    that: inference_backend in inference_supported_backends
+    fail_msg: >-
+      Unknown inference_backend '{{ inference_backend }}'.
+      Supported: {{ inference_supported_backends | join(', ') }}.
+      To add one, create roles/inference_{{ inference_backend }} (see
+      "Adding a backend" in docs/ai-local-stack.md).
+    quiet: true
+
+- name: Pick model tier
+  ansible.builtin.set_fact:
+    inference_tier: >-
+      {{ (ai_model_tiers | selectattr('name', 'equalto', 'cpu') | first)
+           if ai_accelerator == 'cpu'
+         else (ai_model_tiers | selectattr('min_vram_mb', 'le', ai_vram_mb | int) | first) }}
+  when: ai_models is not defined
+
+- name: Select model set
+  ansible.builtin.set_fact:
+    inference_tier_name: "{{ 'override' if ai_models is defined else inference_tier.name }}"
+    inference_models_spec: "{{ ai_models if ai_models is defined else inference_tier.models }}"
+
+- name: Check every model role has an entry for this backend
+  ansible.builtin.assert:
+    that:
+      - item in inference_models_spec
+      - inference_backend in inference_models_spec[item]
+      - inference_models_spec[item][inference_backend] | length > 0
+    fail_msg: >-
+      Model role '{{ item }}' has no '{{ inference_backend }}' model in tier
+      '{{ inference_tier_name }}'. Add it to ai_model_tiers (or ai_models).
+    quiet: true
+  loop: "{{ inference_model_roles }}"
+
+- name: Check the embedding model declares its vector size
+  ansible.builtin.assert:
+    that: (inference_models_spec.embed.dims | default(0) | int) > 0
+    fail_msg: "The embed model role needs a positive 'dims' value."
+    quiet: true
+
+- name: Resolve model ids for this backend
+  ansible.builtin.set_fact:
+    inference_models: >-
+      {{ dict(inference_model_roles
+              | zip(inference_model_roles
+                    | map('extract', inference_models_spec)
+                    | map(attribute=inference_backend))) }}
+    inference_embed_dims: "{{ inference_models_spec.embed.dims | int }}"
+
+# Address local clients use: a wildcard bind is still reached via loopback.
+- name: Set local client address
+  ansible.builtin.set_fact:
+    inference_client_address: >-
+      {{ '127.0.0.1' if inference_bind_address in ['0.0.0.0', '::', ''] else inference_bind_address }}
+
+- name: Report model selection
+  ansible.builtin.debug:
+    msg: >-
+      backend={{ inference_backend }} tier={{ inference_tier_name }}
+      chat={{ inference_models.chat }} fast={{ inference_models.fast }}
+      embed={{ inference_models.embed }} ({{ inference_embed_dims }} dims)
+
+- name: Run inference backend
+  ansible.builtin.include_role:
+    name: "inference_{{ inference_backend }}"
+
+- name: Check the backend published its endpoints
+  ansible.builtin.assert:
+    that:
+      - inference_base_url is defined
+      - inference_base_url is match('^https?://.+/v1$')
+      - inference_health_url is defined
+    fail_msg: >-
+      Backend role inference_{{ inference_backend }} must set inference_base_url
+      (OpenAI-compatible root ending in /v1) and inference_health_url.
+    quiet: true

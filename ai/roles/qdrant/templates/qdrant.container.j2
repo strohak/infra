@@ -1,0 +1,25 @@
+# {{ ansible_managed }}
+# Source: ai/roles/qdrant. Podman Quadlet unit, turned into qdrant.service by systemd.
+[Unit]
+Description=Qdrant vector database
+Wants=network-online.target
+After=network-online.target
+
+{% set bind = "[" + qdrant_bind_address + "]" if ":" in qdrant_bind_address else qdrant_bind_address %}
+[Container]
+ContainerName=qdrant
+Image={{ qdrant_image }}:{{ qdrant_version }}
+PublishPort={{ bind }}:{{ qdrant_http_port }}:6333
+PublishPort={{ bind }}:{{ qdrant_grpc_port }}:6334
+Volume={{ qdrant_volume }}:/qdrant/storage
+{% if qdrant_api_key | length > 0 %}
+Environment=QDRANT__SERVICE__API_KEY={{ qdrant_api_key }}
+{% endif %}
+
+[Service]
+Restart=always
+# The first start pulls the image.
+TimeoutStartSec=900
+
+[Install]
+WantedBy={{ 'default.target' if qdrant_rootless else 'multi-user.target' }}

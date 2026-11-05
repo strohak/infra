@@ -1,0 +1,7 @@
+---
+inference_verify_enabled: true
+inference_verify_endpoints_file: /etc/ai-stack/endpoints.env
+# First requests load models into memory, which can take minutes on CPU.
+inference_verify_timeout: 600
+# Small models occasionally answer in prose instead of calling the tool.
+inference_verify_tool_retries: 3

@@ -1,0 +1,10 @@
+---
+- name: Restart qdrant
+  become: "{{ not qdrant_rootless }}"
+  ansible.builtin.systemd_service:
+    name: qdrant.service
+    scope: "{{ 'user' if qdrant_rootless else 'system' }}"
+    daemon_reload: true
+    state: restarted
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ ai_uid }}"

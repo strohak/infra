@@ -10,6 +10,7 @@ Infrastructure and workstation automation for `bones` (WSL2 dev environment).
  
 - Have your SSH private key accessible (Bitwarden or `C:\Users\Sean\.ssh\`)
 - Have your GitHub credentials ready
+- For the AI stack: install the current NVIDIA driver **on Windows only** (never inside WSL — it breaks GPU passthrough)
 ---
  
 ### 1. Install a fresh WSL2 Ubuntu distro
@@ -33,6 +34,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/strohak/infra/master/worksta
 This installs everything — Go, Podman, zsh, Starship (with a managed `starship.toml`), the GitHub CLI (`gh`), Zellij, all Go tools, and your directory structure. Takes a few minutes.
 
 On a bare-metal Ubuntu-family desktop (detected via the kernel string, as opposed to a WSL2 shell), it also installs VS Code and a curated set of extensions.
+
+The local AI stack (Ollama + Qdrant) is separate and opt-in — see [AI stack](#ai-stack-ollama--qdrant) below.
  
 ---
  
@@ -93,11 +96,18 @@ exec zsh
 ```
 infra/
 ├── README.md              # this file
-└── workstation/
-    ├── bootstrap.sh       # run on a fresh WSL2 install to kick off setup
-    ├── playbook.yml       # Ansible playbook — idempotent, safe to re-run
-    └── files/
-        └── starship.toml  # Starship prompt config, copied to ~/.config/
+├── workstation/
+│   ├── bootstrap.sh       # run on a fresh WSL2 install to kick off setup
+│   ├── playbook.yml       # Ansible playbook — idempotent, safe to re-run
+│   └── files/
+│       └── starship.toml  # Starship prompt config, copied to ~/.config/
+├── ai/                    # local AI stack (inference + Qdrant), any host type
+│   ├── playbook.yml
+│   ├── inventory/         # host types: ai_local, ai_servers (+ group_vars)
+│   └── roles/             # host_facts, inference, inference_ollama, qdrant,
+│                          # ai_endpoints, inference_verify
+└── docs/
+    └── ai-local-stack.md  # design + decisions for the AI stack
 ```
  
 ---
@@ -131,6 +141,52 @@ another toolchain. Bump `go_version` first in that case.
 ## Updating Zellij
 
 Change the `zellij_version` variable at the top of `playbook.yml` and re-run the playbook.
+
+## AI stack (Ollama + Qdrant)
+
+A local inference server plus the Qdrant vector DB, for agents, RAG and scripts.
+Design, decisions and the backend contract: [docs/ai-local-stack.md](docs/ai-local-stack.md).
+
+```bash
+cd ~/code/infra
+# This machine (bones, a desktop...). Drop -K when running as root.
+ansible-playbook -i ai/inventory/hosts.yml ai/playbook.yml --limit localhost -K
+# A LAN server defined in ai/inventory/hosts.yml
+ansible-playbook -i ai/inventory/hosts.yml ai/playbook.yml --limit gpu-box -K --ask-vault-pass
+# Or as part of the workstation playbook
+ansible-playbook workstation/playbook.yml --ask-become-pass -e ai_stack_enabled=true
+```
+
+On WSL2 the first run enables systemd in `/etc/wsl.conf` and stops: run `wsl --shutdown`
+in PowerShell, reopen Ubuntu and run it again.
+
+It detects the host (WSL2 / container / bare metal, NVIDIA / AMD / CPU, VRAM), picks a
+model tier that fits, and ends with a contract check: a real tool call, an embedding, and a
+Qdrant store + search. Everything binds to `127.0.0.1` unless the host is in `ai_servers`.
+
+**Using it:** everything a client needs is in `/etc/ai-stack/endpoints.env`
+(`AI_INFERENCE_BASE_URL`, `AI_MODEL_CHAT`, `AI_MODEL_EMBED`, `QDRANT_URL`, …). Talk only
+the OpenAI-compatible API at that URL so the backend stays swappable:
+
+```bash
+source /etc/ai-stack/endpoints.env
+curl -s "$AI_INFERENCE_BASE_URL/chat/completions" -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$AI_MODEL_CHAT\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+```
+
+Qdrant's dashboard is at <http://localhost:6333/dashboard> (also from a Windows browser).
+
+| To change | Edit, then re-run |
+|---|---|
+| Ollama version | `ollama_version` in `ai/roles/inference_ollama/defaults/main.yml` |
+| Qdrant version | `qdrant_version` in `ai/roles/qdrant/defaults/main.yml` (data is kept) |
+| Models per VRAM tier | `ai_model_tiers` in `ai/roles/inference/defaults/main.yml` |
+| Models for one host/group | `ai_models` in `ai/inventory/group_vars/` or `host_vars/` |
+| Context length, KV cache, keep-alive | `ollama_env` in `ai/roles/inference_ollama/defaults/main.yml` |
+| Inference backend | `inference_backend` — see "Adding a backend" in the design doc |
+
+Check services with `systemctl status ai-inference` and `systemctl --user status qdrant`
+(`sudo systemctl status qdrant` when installed as root).
 
 ## Known machine-specific items (not automated)
 

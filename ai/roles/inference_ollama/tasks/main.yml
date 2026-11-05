@@ -1,0 +1,145 @@
+---
+# inference_ollama — Ollama implementation of the inference contract.
+#
+# GPU drivers are never installed here:
+#   - WSL2: the Windows NVIDIA driver is passed through; installing a Linux
+#     driver inside WSL breaks that passthrough.
+#   - Bare metal / servers: drivers belong to the host owner. Without one,
+#     Ollama simply runs on CPU (host_facts reports which you got).
+
+# ── systemd ────────────────────────────────────────────────────────────────────
+
+- name: Enable systemd in /etc/wsl.conf ([boot] section)
+  become: "{{ ai_become }}"
+  ansible.builtin.lineinfile:
+    path: /etc/wsl.conf
+    line: "[boot]"
+    create: true
+    mode: "0644"
+  when: ai_platform == 'wsl'
+
+- name: Enable systemd in /etc/wsl.conf (systemd=true)
+  become: "{{ ai_become }}"
+  ansible.builtin.lineinfile:
+    path: /etc/wsl.conf
+    regexp: '^\s*systemd\s*='
+    line: systemd=true
+    insertafter: '^\[boot\]'
+  when: ai_platform == 'wsl'
+
+- name: Require systemd
+  ansible.builtin.fail:
+    msg: >-
+      Ollama runs as a systemd service, but systemd is not running here.
+      {{ 'systemd is now enabled in /etc/wsl.conf: run `wsl --shutdown` in
+      PowerShell, reopen the distro and re-run this playbook.'
+         if ai_platform == 'wsl' else
+         'Run this on a host that boots with systemd.' }}
+  when: not ai_init_systemd
+
+# ── Install / upgrade ──────────────────────────────────────────────────────────
+
+- name: Check installed Ollama version
+  ansible.builtin.command: ollama --version
+  register: inference_ollama_installed
+  changed_when: false
+  failed_when: false
+
+# `ollama --version` prints "ollama version is X.Y.Z" (plus a warning on
+# stderr when the server isn't up yet), so compare the last word of stdout.
+- name: Decide whether Ollama needs installing
+  ansible.builtin.set_fact:
+    inference_ollama_needs_install: >-
+      {{ inference_ollama_installed.rc != 0 or
+         (inference_ollama_installed.stdout | trim | split | last | default('')) != ollama_version }}
+
+- name: Download Ollama install script
+  ansible.builtin.get_url:
+    url: "{{ ollama_install_script_url }}"
+    dest: /tmp/ollama-install.sh
+    mode: "0755"
+    force: true
+  when: inference_ollama_needs_install
+
+# The script picks CUDA or ROCm libraries for this host and creates the
+# `ollama` user and /etc/systemd/system/ollama.service.
+- name: Install Ollama {{ ollama_version }}
+  become: "{{ ai_become }}"
+  ansible.builtin.command: sh /tmp/ollama-install.sh
+  environment:
+    OLLAMA_VERSION: "{{ ollama_version }}"
+  changed_when: true
+  notify: Restart ollama
+  when: inference_ollama_needs_install
+
+# ── Configure ──────────────────────────────────────────────────────────────────
+
+- name: Create systemd drop-in directory
+  become: "{{ ai_become }}"
+  ansible.builtin.file:
+    path: /etc/systemd/system/ollama.service.d
+    state: directory
+    mode: "0755"
+
+# A drop-in survives Ollama upgrades, which rewrite ollama.service.
+- name: Configure Ollama service
+  become: "{{ ai_become }}"
+  ansible.builtin.template:
+    src: override.conf.j2
+    dest: /etc/systemd/system/ollama.service.d/override.conf
+    mode: "0644"
+  notify: Restart ollama
+
+# The contract's backend-neutral unit name: `systemctl status ai-inference`
+# works whatever backend is installed. A symlinked unit file is a systemd alias.
+- name: Alias ollama.service as ai-inference.service
+  become: "{{ ai_become }}"
+  ansible.builtin.file:
+    src: /etc/systemd/system/ollama.service
+    dest: /etc/systemd/system/ai-inference.service
+    state: link
+  notify: Restart ollama
+
+- name: Apply pending service changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Start Ollama
+  become: "{{ ai_become }}"
+  ansible.builtin.systemd_service:
+    name: ollama
+    enabled: true
+    state: started
+
+- name: Wait for Ollama to listen
+  ansible.builtin.wait_for:
+    host: "{{ inference_client_address }}"
+    port: "{{ inference_port | int }}"
+    timeout: 60
+
+# ── Models ─────────────────────────────────────────────────────────────────────
+
+- name: List installed models
+  ansible.builtin.command: ollama list
+  environment:
+    OLLAMA_HOST: "{{ inference_client_address }}:{{ inference_port }}"
+  register: inference_ollama_list
+  changed_when: false
+
+- name: Pull missing models
+  ansible.builtin.command: "ollama pull {{ item }}"
+  environment:
+    OLLAMA_HOST: "{{ inference_client_address }}:{{ inference_port }}"
+  # First column of `ollama list` is NAME:TAG
+  loop: "{{ inference_models.values() | unique | list }}"
+  when: item not in (inference_ollama_list.stdout_lines[1:] | map('split') | map('first') | list)
+  changed_when: true
+  async: "{{ ollama_pull_timeout }}"
+  poll: 10
+
+# ── Contract outputs ───────────────────────────────────────────────────────────
+
+- name: Publish endpoints
+  ansible.builtin.set_fact:
+    inference_base_url: "http://{{ inference_client_address }}:{{ inference_port }}/v1"
+    inference_health_url: "http://{{ inference_client_address }}:{{ inference_port }}/api/version"
+    inference_service: ollama

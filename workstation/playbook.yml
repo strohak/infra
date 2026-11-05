@@ -398,6 +398,22 @@
         block: |
           export PATH=$HOME/bin:$PATH
 
+    # ── AI stack (optional) ────────────────────────────────────────────────────
+    # Off by default. `-e ai_stack_enabled=true` runs the same roles as
+    # ai/playbook.yml with their defaults (loopback only, VRAM-based models).
+    # For per-host settings or remote servers, use ai/playbook.yml + inventory.
+
+    - name: Set up AI stack
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../ai/roles/{{ item }}"
+      loop:
+        - host_facts
+        - inference
+        - qdrant
+        - ai_endpoints
+        - inference_verify
+      when: ai_stack_enabled | default(false) | bool
+
     # ── Summary ────────────────────────────────────────────────────────────────
 
     - name: Print completion summary
@@ -413,6 +429,7 @@
           - " Go tools:   gopls, golangci-lint, air, dlv, impl, goimports"
           - " CLI:        gh, zellij {{ zellij_version }}"
           - "{{ ' VS Code:    installed + curated extensions' if not wsl_detected else ' VS Code:    skipped (WSL2 — use the Windows-side install)' }}"
+          - "{{ ' AI stack:   ' + inference_backend + ' + Qdrant (see /etc/ai-stack/endpoints.env)' if ai_stack_enabled | default(false) | bool else ' AI stack:   skipped (-e ai_stack_enabled=true to install)' }}"
           - "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           - " Restore SSH keys and dotfiles manually."
           - " Then run: exec zsh"
