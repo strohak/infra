@@ -1,0 +1,142 @@
+name: ai-stack
+
+on:
+  push:
+    branches: [master, ai-local-stack]
+    paths:
+      - "ai/**"
+      - "examples/mcp-notes/**"
+      - "workstation/**"
+      - ".github/workflows/ai-stack.yml"
+  pull_request:
+    paths:
+      - "ai/**"
+      - "examples/mcp-notes/**"
+      - "workstation/**"
+      - ".github/workflows/ai-stack.yml"
+  workflow_dispatch:
+    inputs:
+      full_stack:
+        description: "Also run the full stack (real Ollama, Qdrant, Open WebUI) on the runner"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-stack-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QDRANT_IMAGE: docker.io/qdrant/qdrant:v1.20.0
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ansible-core ansible-lint
+      - name: ansible-lint (ai/)
+        working-directory: ai
+        run: ansible-lint playbook.yml roles
+      - name: Syntax check playbooks
+        run: |
+          ansible-playbook -i ai/inventory/hosts.yml ai/playbook.yml --syntax-check
+          ansible-playbook workstation/playbook.yml --syntax-check
+      - name: shellcheck
+        run: shellcheck workstation/bootstrap.sh ai/tests/run-contract-tests.sh
+
+  go:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: examples/mcp-notes
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: examples/mcp-notes/go.mod
+          cache-dependency-path: examples/mcp-notes/go.sum
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./... && go vet -tags integration ./...
+      - run: go test -race -count=1 ./...
+
+  # Real roles against a stub backend + a real Qdrant: proves the contract check
+  # passes a good backend and catches broken ones. No GPU or Ollama needed.
+  contract:
+    runs-on: ubuntu-24.04
+    services:
+      qdrant:
+        image: docker.io/qdrant/qdrant:v1.20.0
+        env:
+          QDRANT__SERVICE__API_KEY: test-key-123
+        ports:
+          - 6333:6333
+          - 6334:6334
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ansible-core
+      - name: Wait for Qdrant
+        run: timeout 60 bash -c 'until curl -fs localhost:6333/readyz; do sleep 1; done'
+      - name: Contract tests
+        run: ai/tests/run-contract-tests.sh
+
+  # The real thing on a fresh Ubuntu 24.04 VM, CPU only: Ollama install,
+  # model pulls, Quadlet services (rootless), Open WebUI, the contract check,
+  # Open WebUI seeing the aliases, mcp-notes against real embeddings, and an
+  # idempotent second run. Manual only: it downloads several GB.
+  full-stack:
+    if: github.event_name == 'workflow_dispatch' && inputs.full_stack
+    needs: [lint, go, contract]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: examples/mcp-notes/go.mod
+          cache-dependency-path: examples/mcp-notes/go.sum
+
+      - name: Install Ansible the way bootstrap.sh does
+        run: sudo apt-get update -qq && sudo apt-get install -y ansible
+
+      - name: Run ai/playbook.yml
+        run: |
+          ansible-playbook -i ai/inventory/hosts.yml ai/playbook.yml --limit localhost \
+            | tee run1.log
+      - name: Show endpoints file
+        run: cat /etc/ai-stack/endpoints.env
+
+      - name: Open WebUI lists the stack's models
+        run: |
+          set -euo pipefail
+          source /etc/ai-stack/endpoints.env
+          token=$(curl -fsS -X POST "$OPEN_WEBUI_URL/api/v1/auths/signup" -H 'Content-Type: application/json' \
+            -d '{"name":"ci","email":"ci@example.com","password":"ci-password-123"}' | jq -r .token)
+          models=$(curl -fsS "$OPEN_WEBUI_URL/api/models" -H "Authorization: Bearer $token" | jq -r '.data[].id')
+          echo "$models"
+          for m in "$AI_MODEL_CHAT" "$AI_MODEL_FAST"; do grep -qx "$m" <<<"$models" || { echo "missing $m"; exit 1; }; done
+
+      - name: mcp-notes against the real stack
+        working-directory: examples/mcp-notes
+        run: go test -tags integration -run Integration -count=1 -v ./...
+
+      - name: Second run changes nothing
+        run: |
+          ansible-playbook -i ai/inventory/hosts.yml ai/playbook.yml --limit localhost | tee run2.log
+          grep -E 'localhost +:.*changed=0 ' run2.log
+
+      - name: Service status and logs
+        if: always()
+        run: |
+          systemctl status ollama --no-pager || true
+          systemctl --user status qdrant open-webui --no-pager || true
+          journalctl --user -u open-webui -n 80 --no-pager || true
+          ollama list || true

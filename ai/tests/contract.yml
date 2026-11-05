@@ -1,0 +1,17 @@
+---
+# Contract test: the real host_facts, inference, ai_endpoints and
+# inference_verify roles against a stub backend and a real Qdrant.
+# Run through run-contract-tests.sh, which sets up both.
+- name: AI stack contract test
+  hosts: localhost
+  connection: local
+  vars:
+    stub_port: 18080
+    ai_endpoints_dir: "{{ playbook_dir }}/out"
+    inference_verify_endpoints_file: "{{ playbook_dir }}/out/endpoints.env"
+  roles:
+    - host_facts
+    - inference
+    - qdrant
+    - ai_endpoints
+    - inference_verify

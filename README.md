@@ -35,7 +35,7 @@ This installs everything — Go, Podman, zsh, Starship (with a managed `starship
 
 On a bare-metal Ubuntu-family desktop (detected via the kernel string, as opposed to a WSL2 shell), it also installs VS Code and a curated set of extensions.
 
-The local AI stack (Ollama + Qdrant) is separate and opt-in — see [AI stack](#ai-stack-ollama--qdrant) below.
+The local AI stack (Ollama + Qdrant + Open WebUI) is separate and opt-in — see [AI stack](#ai-stack-ollama--qdrant--open-webui) below.
  
 ---
  
@@ -101,13 +101,18 @@ infra/
 │   ├── playbook.yml       # Ansible playbook — idempotent, safe to re-run
 │   └── files/
 │       └── starship.toml  # Starship prompt config, copied to ~/.config/
-├── ai/                    # local AI stack (inference + Qdrant), any host type
+├── ai/                    # local AI stack (inference + Qdrant + Open WebUI), any host type
 │   ├── playbook.yml
 │   ├── inventory/         # host types: ai_local, ai_servers (+ group_vars)
-│   └── roles/             # host_facts, inference, inference_ollama, qdrant,
-│                          # ai_endpoints, inference_verify
-└── docs/
-    └── ai-local-stack.md  # design + decisions for the AI stack
+│   ├── roles/             # host_facts, inference, inference_ollama, qdrant, open_webui,
+│   │                      # podman_service, ai_endpoints, inference_verify
+│   └── tests/             # contract tests: stub backend + real Qdrant
+├── examples/
+│   └── mcp-notes/         # example MCP tool server in Go (template for your own tools)
+├── docs/
+│   └── ai-local-stack.md  # design + decisions for the AI stack
+└── .github/workflows/
+    └── ai-stack.yml       # lint, Go tests, contract tests, manual full-stack run
 ```
  
 ---
@@ -142,9 +147,10 @@ another toolchain. Bump `go_version` first in that case.
 
 Change the `zellij_version` variable at the top of `playbook.yml` and re-run the playbook.
 
-## AI stack (Ollama + Qdrant)
+## AI stack (Ollama + Qdrant + Open WebUI)
 
-A local inference server plus the Qdrant vector DB, for agents, RAG and scripts.
+A local inference server, the Qdrant vector DB and the Open WebUI chat UI, for agents, RAG,
+scripts and your own MCP tools.
 Design, decisions and the backend contract: [docs/ai-local-stack.md](docs/ai-local-stack.md).
 
 ```bash
@@ -174,19 +180,36 @@ curl -s "$AI_INFERENCE_BASE_URL/chat/completions" -H 'Content-Type: application/
   -d "{\"model\":\"$AI_MODEL_CHAT\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
 ```
 
-Qdrant's dashboard is at <http://localhost:6333/dashboard> (also from a Windows browser).
+Ask for the stable aliases (`ai:chat`, `ai:fast`, `ai:embed`), not model tags: they keep
+working when a tier's model or the backend changes.
+
+From a browser (on WSL2, the Windows one works too):
+
+- **Open WebUI:** <http://localhost:3000>. **Create your account first**, because the first account becomes admin.
+- **Qdrant dashboard:** <http://localhost:6333/dashboard>.
+
+**Your own tools:** write them as MCP servers in Go. [`examples/mcp-notes`](examples/mcp-notes) is a
+working template (add/search notes over `ai:embed` + Qdrant), with steps to register it in Open
+WebUI or Claude Code.
 
 | To change | Edit, then re-run |
 |---|---|
 | Ollama version | `ollama_version` in `ai/roles/inference_ollama/defaults/main.yml` |
 | Qdrant version | `qdrant_version` in `ai/roles/qdrant/defaults/main.yml` (data is kept) |
+| Open WebUI version, or turn it off | `open_webui_version` / `open_webui_enabled` in `ai/roles/open_webui/defaults/main.yml` |
+| MCP tools pre-registered in Open WebUI | `open_webui_mcp_servers` (applied on its first start) |
 | Models per VRAM tier | `ai_model_tiers` in `ai/roles/inference/defaults/main.yml` |
 | Models for one host/group | `ai_models` in `ai/inventory/group_vars/` or `host_vars/` |
 | Context length, KV cache, keep-alive | `ollama_env` in `ai/roles/inference_ollama/defaults/main.yml` |
 | Inference backend | `inference_backend` — see "Adding a backend" in the design doc |
 
-Check services with `systemctl status ai-inference` and `systemctl --user status qdrant`
-(`sudo systemctl status qdrant` when installed as root).
+Check services with `systemctl status ai-inference` and `systemctl --user status qdrant open-webui`
+(`sudo systemctl status qdrant open-webui` when installed as root).
+
+**Tests:** CI (`.github/workflows/ai-stack.yml`) lints everything, runs the Go tests and runs the
+contract tests on every push. The **full-stack** job (Actions → ai-stack → Run workflow) installs
+the real stack on a fresh Ubuntu VM. To run the contract tests locally, see [Tests and
+CI](docs/ai-local-stack.md#tests-and-ci).
 
 ## Known machine-specific items (not automated)
 

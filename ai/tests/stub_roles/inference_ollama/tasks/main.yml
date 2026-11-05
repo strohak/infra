@@ -1,0 +1,8 @@
+---
+# TEST STUB: stands in for the real inference_ollama role in contract tests.
+# It installs nothing and points the stack at tests/stub_server.py, which shows
+# that any server meeting the contract can replace the backend.
+- name: "TEST STUB backend: publish endpoints for the stub server"
+  ansible.builtin.set_fact:
+    inference_base_url: "http://127.0.0.1:{{ stub_port }}/v1"
+    inference_health_url: "http://127.0.0.1:{{ stub_port }}/api/version"

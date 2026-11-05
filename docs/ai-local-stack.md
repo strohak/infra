@@ -23,16 +23,19 @@ The Ansible lives in [`ai/`](../ai); the Go harness will live in its own repo.
 ## Architecture
 
 ```
-            ┌──────────── consumers (backend-agnostic) ────────────┐
-            │  Go harness · scripts · shells                       │
-            │  read /etc/ai-stack/endpoints.env, nothing else      │
-            └───────┬──────────────────────────────┬───────────────┘
-   OpenAI-compatible│/v1                    REST/gRPC│
-            ┌───────▼────────┐             ┌────────▼────────┐
-            │ ai-inference   │             │ Qdrant          │
-            │ (ollama today) │             │ Podman/Quadlet  │
-            └────────────────┘             └─────────────────┘
+   ┌──────────────── consumers (backend-agnostic) ─────────────────┐
+   │  Open WebUI (:3000) · Go harness · scripts · MCP tool servers │
+   │  read /etc/ai-stack/endpoints.env; ask for ai:chat / ai:embed │
+   └─────────┬───────────────────────────────────────┬─────────────┘
+  OpenAI-compatible /v1                        REST / gRPC
+   ┌─────────▼──────────┐                  ┌─────────▼─────────┐
+   │ ai-inference       │                  │ Qdrant            │
+   │ (ollama today)     │                  │ (Podman/Quadlet)  │
+   └────────────────────┘                  └───────────────────┘
 ```
+
+Tools plug in as MCP servers (Streamable HTTP), e.g. [`examples/mcp-notes`](../examples/mcp-notes).
+Any MCP client can use them: Open WebUI, the Go harness or Claude Code.
 
 Ansible roles, in run order:
 
@@ -41,9 +44,11 @@ Ansible roles, in run order:
 | `host_facts` | Detects platform (wsl/container/baremetal), systemd, accelerator (nvidia/amd/cpu), VRAM, arch. Changes nothing. |
 | `inference` | Backend-neutral dispatcher: validates `inference_backend`, picks the model tier, resolves model ids, runs `inference_<backend>`, checks the backend published its endpoints. |
 | `inference_ollama` | The Ollama implementation of the contract. |
-| `qdrant` | Qdrant in Podman as a systemd service. |
+| `qdrant` | Qdrant v1.20.0 container. Refuses a non-loopback bind without an API key. |
+| `open_webui` | Open WebUI v0.12.5 container wired to the contract (optional: `open_webui_enabled`). |
 | `ai_endpoints` | Writes `/etc/ai-stack/endpoints.env` (and the Qdrant key file). |
 | `inference_verify` | Contract check through the endpoints file only. |
+| `podman_service` | Shared helper: runs a container as a systemd service via a Quadlet unit. Rootless with linger as a user, system scope as root. Used by `qdrant` and `open_webui`, and reusable for your own services. |
 
 ## The inference contract
 
@@ -53,14 +58,19 @@ A backend role `inference_<name>` must:
    - `GET /models`;
    - `POST /chat/completions` (streaming and `tools`);
    - `POST /embeddings`.
-2. **Serve the three logical models.** For each role in `ai_model_tiers` (`chat`, `fast`, `embed`), it reads only its own column, e.g. `chat: { ollama: "qwen3:8b", llamacpp: "…" }`. The ids must match exactly what `/v1/models` reports.
+2. **Serve the three logical models under stable aliases:** `ai:chat`, `ai:fast` and `ai:embed`
+   (prefix: `inference_alias_name`). For each role in `ai_model_tiers`, the backend reads only
+   its own column, e.g. `chat: { ollama: "qwen3:8b", llamacpp: "…" }`, and serves that model
+   under the alias. Clients only ever ask for the alias, so changing a tier's model, or the
+   backend, never changes client config. Ollama does this with `ollama cp`, which copies only the
+   manifest and costs no disk. llama-server uses `--alias`.
 3. **Run under systemd** with the alias `ai-inference.service`, so `systemctl status ai-inference` works whatever the backend.
 4. **Set two facts:** `inference_base_url` (ending in `/v1`) and `inference_health_url`.
 5. **Keep tuning server-side.** Context length, KV-cache type and keep-alive go in the backend's own service config, never in requests. That's what lets clients use the plain OpenAI API with no backend-specific parameters.
 
 `inference_verify` then proves the contract. Using only `endpoints.env`, it checks:
 
-- every model is listed by `/v1/models`;
+- every alias is listed by `/v1/models`;
 - the chat model returns a `get_weather` **tool call**;
 - the fast model answers;
 - embeddings have exactly `AI_EMBED_DIMS` dimensions;
@@ -78,10 +88,22 @@ A backend role `inference_<name>` must:
 3. Add a `llamacpp:` column to every model role in `ai_model_tiers`. Keep the same
    embedding model, or note the re-index below.
 4. Run with `-e inference_backend=llamacpp`. The contract check tells you what's missing.
+5. Add the backend to `ai/tests` if it needs a different stub, then run
+   `ai/tests/run-contract-tests.sh`.
+
+llama.cpp specifics (lessons from [grvpanchal/homellm](https://github.com/grvpanchal/homellm)):
+
+- **Turn off the RAM prompt cache:** `--cache-ram 0` (or `LLAMA_ARG_CACHE_RAM=0`). The default is about 8 GB and grows until a small box hits the OOM killer.
+- **Cap memory in the unit:** `MemoryHigh=` / `MemoryMax=`, so a runaway process is throttled or killed instead of taking the machine down.
+- **Tool calling:** pass `--jinja`; it's what gives OpenAI-style `tool_calls`.
+- **One model per process:** run one `llama-server` per role (`--alias ai:chat`, etc., on separate ports behind one front door), or use its router mode. Either way, the contract wants all three aliases at one base URL.
+- **Quantized KV cache:** `-fa on --cache-type-k q8_0 --cache-type-v q8_0` mirrors what Ollama does with `OLLAMA_KV_CACHE_TYPE`.
 
 **Changing the embedding model means re-indexing.** Vectors from different models can't be
-mixed. Collection names should include model and size, e.g. `docs__nomic-embed-text__768`,
-so a mismatch fails loudly instead of returning nonsense.
+mixed. Collection names include the *source* model and size, e.g.
+`notes__nomic-embed-text-latest__768` (from `AI_MODEL_EMBED_SOURCE` + `AI_EMBED_DIMS`), so a new
+model starts a fresh index instead of silently returning nonsense. Open WebUI follows the same
+rule through its `QDRANT_COLLECTION_PREFIX`.
 
 ### endpoints.env
 
@@ -90,14 +112,20 @@ AI_INFERENCE_BACKEND=ollama
 AI_INFERENCE_BASE_URL=http://127.0.0.1:11434/v1
 AI_INFERENCE_HEALTH_URL=http://127.0.0.1:11434/api/version
 AI_MODEL_TIER=8gb
-AI_MODEL_CHAT=qwen3:8b
-AI_MODEL_FAST=gemma4:e4b
-AI_MODEL_EMBED=nomic-embed-text:latest
+AI_MODEL_CHAT=ai:chat
+AI_MODEL_FAST=ai:fast
+AI_MODEL_EMBED=ai:embed
+AI_MODEL_CHAT_SOURCE=qwen3:8b
+AI_MODEL_FAST_SOURCE=qwen3:4b
+AI_MODEL_EMBED_SOURCE=nomic-embed-text:latest
 AI_EMBED_DIMS=768
 QDRANT_URL=http://127.0.0.1:6333
 QDRANT_GRPC=127.0.0.1:6334
 QDRANT_API_KEY_FILE=
+OPEN_WEBUI_URL=http://127.0.0.1:3000
 ```
+
+Use the `AI_MODEL_*` aliases in requests. The `*_SOURCE` values say what's behind them right now.
 
 ## Decisions
 
@@ -122,13 +150,15 @@ Each tier is the first that fits the detected VRAM of the largest single GPU; CP
 |---|---|---|---|---|
 | 24gb | 23000 MiB | `qwen3.6:27b` | `qwen3:8b` | `nomic-embed-text` (768) |
 | 16gb | 15500 MiB | `gpt-oss:20b` | `qwen3:8b` | `nomic-embed-text` (768) |
-| 8gb (bones) | 7500 MiB | `qwen3:8b` | `gemma4:e4b` | `nomic-embed-text` (768) |
+| 8gb (bones) | 7500 MiB | `qwen3:8b` | `qwen3:4b` | `nomic-embed-text` (768) |
 | cpu | — | `qwen3:4b` | `qwen3:4b` | `nomic-embed-text` (768) |
 
 Why these models:
 
 - **`qwen3:8b`** is the most-recommended 8–12 GB model for reliable tool calling.
-- **`gemma4:e4b`** adds a fast general model with vision.
+- **`qwen3:4b`** is the fast model on 8 GB. At about 2.6 GB, chat (about 5.2 GB) + fast + embed all stay loaded on a
+  12 GB card with room for context, so Ollama doesn't keep swapping models in and out.
+  (`gemma4:e4b`, about 6.6 GB, was the first pick, but the two together don't fit.)
 - **`nomic-embed-text`** is the most widely used local embedding model.
 
 These picks come from community comparisons (sources below), not our own benchmarks. Change
@@ -148,9 +178,45 @@ Server tuning (Ollama):
 | pgvector | Good if Postgres is already in the stack; it isn't, and running Postgres just for vectors is more to maintain. |
 | chromem-go / sqlite-vec | Embedded and appealing, but neither Go package has had a release since 2024. |
 
-How it runs: a Podman **Quadlet** unit. It's rootless under `systemd --user` with linger for a
-normal user, and a system service when run as root. Data is kept in the named volume
-`qdrant-data`, so upgrades are just a version bump.
+How it runs: through `podman_service`, as a Podman **Quadlet** unit. It's rootless under
+`systemd --user` with linger for a normal user, and a system service when run as root. Data is
+kept in the named volume `qdrant-data`, so upgrades are just a version bump.
+
+### Chat UI: Open WebUI (v0.12.5)
+
+A ready-made chat and document-search UI while the Go harness is being built, at `http://127.0.0.1:3000`.
+
+- **Wired to the contract, not to Ollama:**
+  - `ENABLE_OLLAMA_API=false`;
+  - models come from `OPENAI_API_BASE_URL` = `AI_INFERENCE_BASE_URL`;
+  - `DEFAULT_MODELS=ai:chat`, and title/tag generation uses `ai:fast`.
+
+  Swapping the backend needs no UI change.
+- **Document search** embeds with `ai:embed` and stores vectors in *our* Qdrant (`VECTOR_DB=qdrant`) under the prefix `open-webui__<model>__<dims>`.
+- **Security and privacy:**
+  - logins on (`WEBUI_AUTH=true`);
+  - the **first account created is admin**; later sign-ups wait for approval;
+  - the secret key is generated once on the host and kept in a `0600` env file;
+  - telemetry and update checks are off.
+- **Networking:** it uses host networking so it can reach the loopback-bound services. `HOST`/`PORT` keep Open WebUI itself on `open_webui_bind_address`.
+- **Settings are seeded only on first start.** After that, Open WebUI stores them in its database and Admin Settings win. That's fine here, because the aliases and URLs it's given don't change.
+- **Version:** pinned to v0.12.5, the last patch of the previous minor line. v0.13.0 shipped two days before this was written.
+
+### Tools: MCP servers in Go
+
+Your own tools are **MCP servers over Streamable HTTP**, written in Go with
+`github.com/modelcontextprotocol/go-sdk` (v1.8.0). Built this way, one tool works in Open WebUI,
+the Go harness and Claude Code. Open WebUI's other options lock tools to it: in-app Python Tools
+can't be reused anywhere else, and OpenAPI servers aren't MCP.
+
+- **Template:** [`examples/mcp-notes`](../examples/mcp-notes), with `add_note` and `search_notes` over `ai:embed` + Qdrant. It's tested through a real MCP client, both in memory and over HTTP.
+- **Registering in Open WebUI:**
+  - in Admin Settings → External Tools; or
+  - with `open_webui_mcp_servers` in inventory (seeded on first start).
+
+  A server with no access grants is **admin-only**, which suits a personal install.
+- **Transport:** only Streamable HTTP connects directly. Older stdio/SSE servers need the `mcpo` bridge.
+- **Security:** bind tools to `127.0.0.1`. mcp-notes refuses any other address unless a bearer token is set.
 
 ### Harness: Go, no framework (yet)
 
@@ -173,13 +239,41 @@ Roadmap:
    - retrieve and stuff the results into the prompt.
 5. **MCP client:** load tools from MCP servers.
 
+## Tests and CI
+
+`.github/workflows/ai-stack.yml`:
+
+| Job | When | What |
+|---|---|---|
+| `lint` | every push/PR | `ansible-lint` (production profile), syntax checks, `shellcheck` |
+| `go` | every push/PR | `gofmt`, `go vet`, `go test -race` for mcp-notes |
+| `contract` | every push/PR | `ai/tests/run-contract-tests.sh` (see below) |
+| `full-stack` | manual (Actions → ai-stack → Run workflow) | Runs the real playbook on a fresh Ubuntu 24.04 VM, CPU only: <br>• Ollama install + model pulls<br>• rootless Quadlet services<br>• the contract check<br>• Open WebUI listing `ai:chat`<br>• mcp-notes against real embeddings<br>• an idempotent second run |
+
+The contract tests run the real `host_facts`, `inference`, `ai_endpoints` and
+`inference_verify` roles. They use a stub OpenAI-compatible server (`ai/tests/stub_server.py`,
+shadowing `inference_ollama`) and a real Qdrant. They check:
+
+- a good backend passes, and a re-run changes nothing;
+- a wrong embedding size, missing tool calls and a missing alias each fail with a clear message;
+- an unknown backend, or a model set with no column for the backend, is rejected;
+- the right tier is picked for CPU-only, 12 GB and 24 GB.
+
+Run locally:
+
+```bash
+docker run -d --name qdrant-test -p 127.0.0.1:6333:6333 -p 127.0.0.1:6334:6334 \
+  -e QDRANT__SERVICE__API_KEY=test-key-123 docker.io/qdrant/qdrant:v1.20.0
+ai/tests/run-contract-tests.sh
+```
+
 ## Host types
 
 | Type | How | Notes |
 |---|---|---|
 | WSL2 (bones) | `--limit localhost` | The role sets `systemd=true` in `/etc/wsl.conf`; the first run asks for a `wsl --shutdown`. Windows apps reach `localhost:11434` / `:6333` through WSL's localhost forwarding. |
 | Bare-metal desktop | `--limit localhost` | Install the GPU driver first (or run on CPU). |
-| LAN server | an `ai_servers` host over SSH | Binds `0.0.0.0`. A Qdrant API key is required (vault). Ollama has no auth, so firewall the port to your LAN or front it with an authenticating proxy. |
+| LAN server | an `ai_servers` host over SSH | Binds `0.0.0.0`. A Qdrant API key is required (vault). Ollama has no auth, so firewall the port to your LAN. Open WebUI has logins, but create the admin account before anyone else can reach it. |
 | Container | as root | `host_facts` reports `container`. Services need systemd running in the container. |
 
 Adding a new type:
@@ -196,3 +290,6 @@ Adding a new type:
 - Model picks: [localaimaster.com: best Ollama models for agents](https://localaimaster.com/blog/best-ollama-models-for-agents) · [VRAM table](https://localaimaster.com/blog/ollama-model-ram-vram-table) · [haimaker.ai VRAM tiers](https://haimaker.ai/blog/ollama-coding-models-by-nvidia-rtx-vram/) · [webscraft.org tool-calling comparison](https://webscraft.org/blog/yaku-model-ollama-obrati-dlya-agenta-z-tool-calling-porivnyannya-i-benchmarki?lang=en)
 - Go frameworks: [xavidop.me: Go GenAI frameworks 2026](https://xavidop.me/genkit/2026-09-21-top-go-genai-frameworks-2026/) · [encore.dev](https://encore.dev/articles/best-go-framework-for-building-ai-agents)
 - Vector DBs: [techsy.io: Qdrant vs Chroma vs pgvector](https://techsy.io/en/blog/qdrant-vs-chroma-vs-pgvector)
+- Open WebUI v0.12.5 settings (env var names, `TOOL_SERVER_CONNECTIONS` format, admin-only default for tool servers, `/health`): read from its source at tag `v0.12.5` (`backend/open_webui/config.py`, `env.py`, `routers/configs.py`, `utils/access_control`). Release dates from PyPI.
+- Open WebUI docs: [MCP](https://docs.openwebui.com/features/extensibility/mcp/) · [Tools](https://docs.openwebui.com/features/extensibility/plugin/tools/)
+- Similar projects reviewed: [g1ibby/homellm](https://github.com/g1ibby/homellm) · [grvpanchal/homellm](https://github.com/grvpanchal/homellm) · [mauricubo/homellm](https://github.com/mauricubo/homellm)

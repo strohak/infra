@@ -1,0 +1,7 @@
+---
+# TEST STUB: Qdrant itself runs as a container started by the test runner (CI
+# service container or `docker run`); this only publishes where it is.
+- name: "TEST STUB qdrant: use the externally started Qdrant"
+  ansible.builtin.set_fact:
+    qdrant_url: "http://127.0.0.1:6333"
+    qdrant_grpc: "127.0.0.1:6334"
