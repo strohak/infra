@@ -2,7 +2,7 @@
 # bootstrap.sh — Run on a fresh WSL2 Ubuntu install to restore your workstation.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/strohak/infra/main/workstation/bootstrap.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/strohak/infra/master/workstation/bootstrap.sh | bash
 # or after cloning:
 #   bash ~/code/infra/workstation/bootstrap.sh
  

@@ -81,6 +81,16 @@
         dpkg_arch: "{{ lookup('pipe', 'dpkg --print-architecture') }}"
         become_needed: "{{ ansible_facts['effective_user_id'] != 0 }}"
 
+    # Go tarballs use Debian arch names (amd64/arm64); Zellij uses GNU triples.
+    - name: Fail on unsupported architecture
+      fail:
+        msg: "Unsupported architecture '{{ dpkg_arch }}' — only amd64 and arm64 are handled"
+      when: dpkg_arch not in ['amd64', 'arm64']
+
+    - name: Set release asset arch names
+      set_fact:
+        zellij_arch: "{{ {'amd64': 'x86_64', 'arm64': 'aarch64'}[dpkg_arch] }}"
+
     # ── GitHub CLI apt repo ────────────────────────────────────────────────────
 
     - name: Add GitHub CLI apt keyring directory
@@ -166,7 +176,7 @@
     - name: Download Go tarball
       become: "{{ become_needed }}"
       get_url:
-        url: "https://go.dev/dl/go{{ go_version }}.linux-amd64.tar.gz"
+        url: "https://go.dev/dl/go{{ go_version }}.linux-{{ dpkg_arch }}.tar.gz"
         dest: "/tmp/go{{ go_version }}.tar.gz"
         mode: "0644"
       when: go_needs_install
@@ -232,7 +242,7 @@
 
     - name: Download Zellij tarball
       get_url:
-        url: "https://github.com/zellij-org/zellij/releases/download/v{{ zellij_version }}/zellij-x86_64-unknown-linux-musl.tar.gz"
+        url: "https://github.com/zellij-org/zellij/releases/download/v{{ zellij_version }}/zellij-{{ zellij_arch }}-unknown-linux-musl.tar.gz"
         dest: "/tmp/zellij-{{ zellij_version }}.tar.gz"
         mode: "0644"
       when: zellij_needs_install
@@ -254,8 +264,11 @@
       ignore_errors: true
       changed_when: false
 
+    # Run the installer with become so it can write to /usr/local/bin itself;
+    # otherwise it tries to call sudo interactively, which hangs under Ansible.
     - name: Install Starship
-      shell: curl -sS https://starship.rs/install.sh | sh -s -- --yes
+      become: "{{ become_needed }}"
+      shell: curl -sS https://starship.rs/install.sh | sh -s -- --yes --bin-dir /usr/local/bin
       when: starship_check.failed
 
     - name: Add Starship init to .zshrc
